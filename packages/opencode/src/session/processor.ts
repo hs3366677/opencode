@@ -30,6 +30,7 @@ export namespace SessionProcessor {
     abort: AbortSignal
   }) {
     const toolcalls: Record<string, MessageV2.ToolPart> = {}
+    const toolInputDeltas: Record<string, string> = {} // Accumulate input deltas for each tool
     let snapshot: string | undefined
     let blocked = false
     let attempt = 0
@@ -101,6 +102,8 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-input-start":
+                  // Initialize delta accumulator for this tool
+                  toolInputDeltas[value.id] = ""
                   const part = await Session.updatePart({
                     id: toolcalls[value.id]?.id ?? Identifier.ascending("part"),
                     messageID: input.assistantMessage.id,
@@ -118,9 +121,44 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-input-delta":
+                  // Accumulate input deltas and try to parse partial JSON
+                  if (toolInputDeltas[value.id] !== undefined) {
+                    toolInputDeltas[value.id] += value.delta
+                    const match = toolcalls[value.id]
+                    if (match && match.state.status === "pending") {
+                      // Try to parse partial input for display
+                      let partialInput: Record<string, any> = {}
+                      try {
+                        // Try parsing as complete JSON first
+                        partialInput = JSON.parse(toolInputDeltas[value.id])
+                      } catch {
+                        // Try to extract partial key-value pairs from incomplete JSON
+                        // This handles streaming like: {"file_path":"/some/path","new_str
+                        const raw = toolInputDeltas[value.id]
+                        const keyValueRegex = /"([^"]+)":\s*"([^"]*?)(?:"|$)/g
+                        let kvMatch
+                        while ((kvMatch = keyValueRegex.exec(raw)) !== null) {
+                          partialInput[kvMatch[1]] = kvMatch[2]
+                        }
+                      }
+                      // Update part with accumulated raw and any parsed input
+                      if (Object.keys(partialInput).length > 0 || toolInputDeltas[value.id].length > 0) {
+                        await Session.updatePart({
+                          ...match,
+                          state: {
+                            status: "pending",
+                            input: partialInput,
+                            raw: toolInputDeltas[value.id],
+                          },
+                        })
+                      }
+                    }
+                  }
                   break
 
                 case "tool-input-end":
+                  // Clean up delta accumulator
+                  delete toolInputDeltas[value.id]
                   break
 
                 case "tool-call": {

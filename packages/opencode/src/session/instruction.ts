@@ -27,6 +27,35 @@ function globalFiles() {
   return files
 }
 
+async function loadGodotDocumentation(): Promise<string[]> {
+  const projectPath = Instance.directory
+  const projectGodot = path.join(projectPath, "project.godot")
+
+  // Check if this is a Godot project
+  if (!(await Bun.file(projectGodot).exists())) {
+    return []
+  }
+
+  // Load Makabaka engine docs from worktree
+  const docs: string[] = []
+  const docPaths = [
+    path.join(Instance.worktree, "docs/game-development-rule.md"),
+    path.join(Instance.worktree, "docs/ai-programming-style-guide.md"),
+    path.join(Instance.worktree, "docs/context-optimization-guide.md"),
+  ]
+
+  for (const docPath of docPaths) {
+    const content = await Bun.file(docPath)
+      .text()
+      .catch(() => "")
+    if (content) {
+      docs.push("Makabaka Engine Documentation from: " + docPath + "\n" + content)
+    }
+  }
+
+  return docs
+}
+
 async function resolveRelative(instruction: string): Promise<string[]> {
   if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
     return Filesystem.globUp(instruction, Instance.directory, Instance.worktree).catch(() => [])
@@ -110,7 +139,10 @@ export namespace InstructionPrompt {
         .then((x) => (x ? "Instructions from: " + url + "\n" + x : "")),
     )
 
-    return Promise.all([...files, ...fetches]).then((result) => result.filter(Boolean))
+    // Add Godot-specific documentation for Makabaka engine projects
+    const godotDocs = await loadGodotDocumentation()
+
+    return Promise.all([...files, ...fetches, ...godotDocs]).then((result) => result.filter(Boolean))
   }
 
   export function loaded(messages: MessageV2.WithParts[]) {
