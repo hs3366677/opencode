@@ -46,6 +46,7 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
+import { AutoTest } from "./auto-test"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -616,7 +617,11 @@ export namespace SessionPrompt {
         tools,
         model,
       })
-      if (result === "stop") break
+      if (result === "stop") {
+        // Auto-test disabled for now - use manual "Verify" button in Godot editor
+        // TODO: Re-enable with smarter triggering (only after code changes)
+        break
+      }
       if (result === "compact") {
         await SessionCompaction.create({
           sessionID,
@@ -697,7 +702,14 @@ export namespace SessionPrompt {
       { modelID: input.model.api.id, providerID: input.model.providerID },
       input.agent,
     )) {
-      const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+      // Skip tools with invalid parameters schema
+      let schema: any
+      try {
+        schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+      } catch (e) {
+        log.warn("skipping tool with invalid parameters schema", { toolId: item.id, error: String(e) })
+        continue
+      }
       tools[item.id] = tool({
         id: item.id as any,
         description: item.description,

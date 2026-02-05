@@ -307,6 +307,7 @@ export namespace MessageV2 {
     time: z.object({
       created: z.number(),
     }),
+    synthetic: z.boolean().optional(), // Mark as synthetic to prevent auto-test loops
     summary: z
       .object({
         title: z.string().optional(),
