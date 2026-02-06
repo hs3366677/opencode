@@ -27,7 +27,15 @@ import { LspTool } from "./lsp"
 import { Truncate } from "./truncation"
 import { PlanExitTool, PlanEnterTool } from "./plan"
 import { ApplyPatchTool } from "./apply_patch"
-import { GodotTools } from "./godot"
+import { GodotAssetImportTool, GodotAssetImportBatchTool } from "./godot-asset-import"
+import {
+  GodotAssetGenerateTool,
+  GodotAssetCreatePlaceholderTool,
+  GodotAssetRegenerateTool,
+  GodotAssetTransformTool,
+  GodotAssetRefinePromptTool,
+  GodotAssetListModelsTool,
+} from "./godot-ai-asset"
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
@@ -119,7 +127,15 @@ export namespace ToolRegistry {
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool, PlanEnterTool] : []),
-      ...GodotTools,
+      // Godot AI Asset tools
+      GodotAssetImportTool,
+      GodotAssetImportBatchTool,
+      GodotAssetGenerateTool,
+      GodotAssetCreatePlaceholderTool,
+      GodotAssetRegenerateTool,
+      GodotAssetTransformTool,
+      GodotAssetRefinePromptTool,
+      GodotAssetListModelsTool,
       ...custom,
     ]
   }
