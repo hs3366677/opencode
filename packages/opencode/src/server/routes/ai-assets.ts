@@ -1,0 +1,420 @@
+import { Hono } from "hono"
+import { describeRoute, validator, resolver } from "hono-openapi"
+import z from "zod"
+import { lazy } from "../../util/lazy"
+import { AssetProviderRegistry } from "../../provider/asset"
+import { AssetProvider } from "../../provider/asset/asset-provider"
+import { AssetMetadata } from "../../provider/asset/metadata"
+import { Instance } from "../../project/instance"
+import path from "path"
+import fs from "fs/promises"
+
+export const AIAssetRoutes = lazy(() =>
+  new Hono()
+    // ── Provider & Model Discovery ─────────────────────────────────────
+
+    .get(
+      "/providers",
+      describeRoute({
+        summary: "List asset providers",
+        description: "Get all registered asset generation providers and their capabilities.",
+        operationId: "ai-assets.providers.list",
+        responses: {
+          200: {
+            description: "List of asset providers",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.array(
+                    z.object({
+                      id: z.string(),
+                      name: z.string(),
+                      supportedTypes: z.array(AssetProvider.AssetType),
+                    }),
+                  ),
+                ),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        const providers = AssetProviderRegistry.list()
+        return c.json(
+          providers.map((p) => ({
+            id: p.id,
+            name: p.name,
+            supportedTypes: p.supportedTypes,
+          })),
+        )
+      },
+    )
+
+    .get(
+      "/models",
+      describeRoute({
+        summary: "List all models",
+        description: "Get all available models from all registered providers.",
+        operationId: "ai-assets.models.list",
+        responses: {
+          200: {
+            description: "Models grouped by provider",
+            content: {
+              "application/json": {
+                schema: resolver(z.record(z.string(), z.array(AssetProvider.ModelInfo))),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        const models = await AssetProviderRegistry.listAllModels()
+        return c.json(models)
+      },
+    )
+
+    .get(
+      "/models/:providerId",
+      describeRoute({
+        summary: "List provider models",
+        description: "Get available models for a specific provider.",
+        operationId: "ai-assets.models.byProvider",
+        responses: {
+          200: {
+            description: "List of models",
+            content: {
+              "application/json": {
+                schema: resolver(z.array(AssetProvider.ModelInfo)),
+              },
+            },
+          },
+        },
+      }),
+      validator("param", z.object({ providerId: z.string() })),
+      async (c) => {
+        const { providerId } = c.req.valid("param" as never) as { providerId: string }
+        const models = await AssetProviderRegistry.listModels(providerId)
+        return c.json(models)
+      },
+    )
+
+    // ── Generation ─────────────────────────────────────────────────────
+
+    .post(
+      "/generate",
+      describeRoute({
+        summary: "Generate an asset",
+        description: "Start an asset generation job using the configured provider.",
+        operationId: "ai-assets.generate",
+        responses: {
+          200: {
+            description: "Generation started",
+            content: {
+              "application/json": {
+                schema: resolver(AssetProvider.GenerationResult),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "json",
+        z.object({
+          type: AssetProvider.AssetType,
+          prompt: z.string(),
+          negativePrompt: z.string().optional(),
+          model: z.string().optional(),
+          parameters: z.record(z.string(), z.any()).default({}),
+        }),
+      ),
+      async (c) => {
+        const body = c.req.valid("json" as never) as AssetProvider.GenerationRequest
+        const { provider, modelId } = await AssetProviderRegistry.resolveModel(body.type, body.model)
+        const result = await provider.generate({ ...body, model: modelId })
+        return c.json(result)
+      },
+    )
+
+    // ── Status & Download ──────────────────────────────────────────────
+
+    .get(
+      "/status/:providerId/:generationId",
+      describeRoute({
+        summary: "Check generation status",
+        description: "Poll the status of an ongoing asset generation job.",
+        operationId: "ai-assets.status",
+        responses: {
+          200: {
+            description: "Current status",
+            content: {
+              "application/json": {
+                schema: resolver(AssetProvider.GenerationStatus),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          providerId: z.string(),
+          generationId: z.string(),
+        }),
+      ),
+      async (c) => {
+        const { providerId, generationId } = c.req.valid("param" as never) as {
+          providerId: string
+          generationId: string
+        }
+        const provider = AssetProviderRegistry.get(providerId)
+        if (!provider) {
+          return c.json({ error: `Provider not found: ${providerId}` }, 404)
+        }
+        const status = await provider.checkStatus(generationId)
+        return c.json(status)
+      },
+    )
+
+    .get(
+      "/download/:providerId/:generationId",
+      describeRoute({
+        summary: "Download generated assets",
+        description: "Download the completed asset bundle from a generation job.",
+        operationId: "ai-assets.download",
+        responses: {
+          200: {
+            description: "Asset bundle metadata (binary files served separately)",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.object({
+                    bundleId: z.string(),
+                    assets: z.array(
+                      z.object({
+                        type: AssetProvider.AssetType,
+                        role: z.string(),
+                        filename: z.string(),
+                        size: z.number(),
+                        metadata: z.record(z.string(), z.any()),
+                      }),
+                    ),
+                  }),
+                ),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          providerId: z.string(),
+          generationId: z.string(),
+        }),
+      ),
+      async (c) => {
+        const { providerId, generationId } = c.req.valid("param" as never) as {
+          providerId: string
+          generationId: string
+        }
+        const provider = AssetProviderRegistry.get(providerId)
+        if (!provider) {
+          return c.json({ error: `Provider not found: ${providerId}` }, 404)
+        }
+        const bundle = await provider.download(generationId)
+        return c.json({
+          bundleId: bundle.bundleId,
+          assets: bundle.assets.map((a) => ({
+            type: a.type,
+            role: a.role,
+            filename: a.filename,
+            size: a.data.length,
+            metadata: a.metadata,
+          })),
+        })
+      },
+    )
+
+    .get(
+      "/download/:providerId/:generationId/:filename",
+      describeRoute({
+        summary: "Download individual asset file",
+        description: "Download a specific file from a completed asset bundle.",
+        operationId: "ai-assets.download.file",
+        responses: {
+          200: { description: "Binary asset file" },
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          providerId: z.string(),
+          generationId: z.string(),
+          filename: z.string(),
+        }),
+      ),
+      async (c) => {
+        const { providerId, generationId, filename } = c.req.valid("param" as never) as {
+          providerId: string
+          generationId: string
+          filename: string
+        }
+        const provider = AssetProviderRegistry.get(providerId)
+        if (!provider) {
+          return c.json({ error: `Provider not found: ${providerId}` }, 404)
+        }
+        const bundle = await provider.download(generationId)
+        const asset = bundle.assets.find((a) => a.filename === filename)
+        if (!asset) {
+          return c.json({ error: `File not found: ${filename}` }, 404)
+        }
+
+        const contentType = getContentType(filename)
+        return new Response(new Uint8Array(asset.data), {
+          headers: {
+            "Content-Type": contentType,
+            "Content-Disposition": `attachment; filename="${filename}"`,
+            "Content-Length": String(asset.data.length),
+          },
+        })
+      },
+    )
+
+    // ── Transform ──────────────────────────────────────────────────────
+
+    .post(
+      "/transform",
+      describeRoute({
+        summary: "Transform an existing asset",
+        description: "Apply an AI transform (upscale, style transfer, etc.) to an existing asset.",
+        operationId: "ai-assets.transform",
+        responses: {
+          200: {
+            description: "Transform job started",
+            content: {
+              "application/json": {
+                schema: resolver(AssetProvider.GenerationResult),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "json",
+        z.object({
+          sourceType: AssetProvider.AssetType,
+          transform: AssetProvider.TransformType,
+          prompt: z.string().optional(),
+          model: z.string().optional(),
+          parameters: z.record(z.string(), z.any()).default({}),
+          sourceBase64: z.string().describe("Base64-encoded source file"),
+        }),
+      ),
+      async (c) => {
+        const body = c.req.valid("json" as never) as {
+          sourceType: AssetProvider.AssetType
+          transform: AssetProvider.TransformType
+          prompt?: string
+          model?: string
+          parameters: Record<string, any>
+          sourceBase64: string
+        }
+
+        const providers = AssetProviderRegistry.findTransformProviders(body.transform)
+        if (providers.length === 0) {
+          return c.json({ error: `No provider supports transform: ${body.transform}` }, 400)
+        }
+
+        const provider = providers[0]
+        const result = await provider.transform({
+          sourceFile: Buffer.from(body.sourceBase64, "base64"),
+          sourceType: body.sourceType,
+          transform: body.transform,
+          prompt: body.prompt,
+          model: body.model,
+          parameters: body.parameters,
+        })
+
+        return c.json(result)
+      },
+    )
+
+    // ── Supported Types ────────────────────────────────────────────────
+
+    .get(
+      "/types",
+      describeRoute({
+        summary: "List supported asset types",
+        description: "Get all asset types supported by currently registered providers.",
+        operationId: "ai-assets.types",
+        responses: {
+          200: {
+            description: "Supported types",
+            content: {
+              "application/json": {
+                schema: resolver(z.array(AssetProvider.AssetType)),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        return c.json(AssetProviderRegistry.supportedTypes())
+      },
+    )
+
+    // ── Version History ─────────────────────────────────────────────────
+
+    .get("/versions/*", async (c) => {
+      const resPath = c.req.path.replace(/^.*\/versions\//, "")
+      const assetPath = resolveAssetPath(resPath)
+      const versions = await AssetMetadata.listVersions(assetPath)
+      const index = await AssetMetadata.readVersionIndex(assetPath)
+      return c.json({
+        current_version: index?.current_version ?? 0,
+        versions,
+      })
+    })
+
+    .post("/versions/*/use", async (c) => {
+      const resPath = c.req.path.replace(/^.*\/versions\//, "").replace(/\/use$/, "")
+      const assetPath = resolveAssetPath(resPath)
+      const { version } = await c.req.json<{ version: number }>()
+      await AssetMetadata.useVersion(assetPath, version)
+      return c.json({ success: true, version })
+    })
+
+    .delete("/versions/*", async (c) => {
+      const resPath = c.req.path.replace(/^.*\/versions\//, "")
+      const assetPath = resolveAssetPath(resPath)
+      const { version } = await c.req.json<{ version: number }>()
+      await AssetMetadata.deleteVersion(assetPath, version)
+      return c.json({ success: true, version })
+    }),
+)
+
+function resolveAssetPath(resPath: string): string {
+  const projectRoot = Instance.directory
+  if (resPath.startsWith("res://")) {
+    return path.join(projectRoot, resPath.slice(6))
+  }
+  return path.join(projectRoot, resPath)
+}
+
+function getContentType(filename: string): string {
+  const ext = filename.split(".").pop()?.toLowerCase()
+  const types: Record<string, string> = {
+    glb: "model/gltf-binary",
+    gltf: "model/gltf+json",
+    fbx: "application/octet-stream",
+    obj: "text/plain",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    flac: "audio/flac",
+  }
+  return types[ext ?? ""] ?? "application/octet-stream"
+}
