@@ -342,6 +342,16 @@ export namespace SessionProcessor {
               stack: JSON.stringify(e.stack),
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })
+            // Context overflow → compact instead of stopping
+            if (
+              error.name === "APIError" &&
+              error.data.message &&
+              /prompt is too long|context.length.exceeded|request.too.large|maximum.context.length/i.test(error.data.message)
+            ) {
+              log.info("context overflow detected, triggering compaction")
+              needsCompaction = true
+              break
+            }
             const retry = SessionRetry.retryable(error)
             if (retry !== undefined) {
               attempt++

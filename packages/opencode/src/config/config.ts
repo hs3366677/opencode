@@ -1038,6 +1038,21 @@ export namespace Config {
           url: z.string().optional().describe("Enterprise URL"),
         })
         .optional(),
+      asset_provider: z
+        .record(
+          z.string(),
+          z.object({
+            api_key_env: z.string().optional().describe("Environment variable name for API key"),
+            api_url: z.string().optional().describe("Override base API URL"),
+            enabled: z.boolean().default(true),
+            default_models: z
+              .record(z.string(), z.string())
+              .optional()
+              .describe("Default model per asset type for this provider"),
+          }),
+        )
+        .optional()
+        .describe("Asset generation provider configurations (meshy, doubao, suno)"),
       compaction: z
         .object({
           auto: z.boolean().optional().describe("Enable automatic compaction when context is full (default: true)"),
