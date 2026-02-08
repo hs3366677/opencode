@@ -323,6 +323,7 @@
         "opentui-spinner": "0.0.6",
         "partial-json": "0.1.7",
         "remeda": "catalog:",
+        "replicate": "1.4.0",
         "solid-js": "catalog:",
         "strip-ansi": "7.1.2",
         "tree-sitter-bash": "0.25.0",
@@ -3455,6 +3456,8 @@
     "remark-stringify": ["remark-stringify@11.0.0", "", { "dependencies": { "@types/mdast": "^4.0.0", "mdast-util-to-markdown": "^2.0.0", "unified": "^11.0.0" } }, "sha512-1OSmLd3awB/t8qdoEOMazZkNsfVTeY4fTsgzcQFdXNq8ToTN4ZGwrMnlda4K6smTFKD+GRV6O48i6Z4iKgPPpw=="],
 
     "remeda": ["remeda@2.26.0", "", { "dependencies": { "type-fest": "^4.41.0" } }, "sha512-lmNNwtaC6Co4m0WTTNoZ/JlpjEqAjPZO0+czC9YVRQUpkbS4x8Hmh+Mn9HPfJfiXqUQ5IXXgSXSOB2pBKAytdA=="],
+
+    "replicate": ["replicate@1.4.0", "", { "optionalDependencies": { "readable-stream": ">=4.0.0" } }, "sha512-1ufKejfUVz/azy+5TnzQP7U1+MHVWZ6psnQ06az8byUUnRhT+DZ/MvewzB1NQYBVMgNKR7xPDtTwlcP5nv/5+w=="],
 
     "require-from-string": ["require-from-string@2.0.2", "", {}, "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw=="],
 

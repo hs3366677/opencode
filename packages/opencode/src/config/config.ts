@@ -1043,6 +1043,7 @@ export namespace Config {
           z.string(),
           z.object({
             api_key_env: z.string().optional().describe("Environment variable name for API key"),
+            api_key: z.string().optional().describe("Direct API key (synced from editor settings)"),
             api_url: z.string().optional().describe("Override base API URL"),
             enabled: z.boolean().default(true),
             default_models: z
@@ -1052,7 +1053,7 @@ export namespace Config {
           }),
         )
         .optional()
-        .describe("Asset generation provider configurations (meshy, doubao, suno)"),
+        .describe("Asset generation provider configurations (replicate, meshy, doubao, suno)"),
       compaction: z
         .object({
           auto: z.boolean().optional().describe("Enable automatic compaction when context is full (default: true)"),

@@ -19,4 +19,10 @@
     "github-triage": false,
     "github-pr-search": false,
   },
+  "asset_provider": {
+    "replicate": {
+      "api_key_env": "REPLICATE_API_TOKEN",
+      "enabled": true
+    }
+  },
 }
