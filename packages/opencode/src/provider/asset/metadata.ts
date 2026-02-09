@@ -3,33 +3,30 @@ import fs from "fs/promises"
 import { AssetProvider } from "./asset-provider"
 
 /**
- * Asset metadata utilities for reading/writing .ai.json sidecar files.
+ * Asset metadata utilities for reading/writing AI metadata.
  *
- * Sidecar files store extended AI-related metadata alongside assets:
- *   - res://assets/knight.png → res://assets/knight.png.ai.json
+ * All metadata is stored in `.ai.{filename}/metadata.json` (version dir).
+ *   - res://assets/knight.png → res://assets/.ai.knight.png/metadata.json
  */
 export namespace AssetMetadata {
-  /** Get the sidecar path for an asset file */
-  export function sidecarPath(assetPath: string): string {
-    return `${assetPath}.ai.json`
-  }
-
-  /** Read metadata from sidecar file (returns undefined if not found) */
+  /** Read metadata from version dir metadata.json */
   export async function read(assetPath: string): Promise<AssetProvider.AssetMetadata | undefined> {
-    const sidecar = sidecarPath(assetPath)
+    const verIndex = getVersionIndexPath(assetPath)
     try {
-      const content = await fs.readFile(sidecar, "utf-8")
+      const content = await fs.readFile(verIndex, "utf-8")
       return AssetProvider.AssetMetadata.parse(JSON.parse(content))
     } catch {
       return undefined
     }
   }
 
-  /** Write metadata to sidecar file */
+  /** Write metadata to version dir metadata.json */
   export async function write(assetPath: string, metadata: AssetProvider.AssetMetadata): Promise<void> {
-    const sidecar = sidecarPath(assetPath)
+    const verDir = getVersionDir(assetPath)
+    await fs.mkdir(verDir, { recursive: true })
+    const verIndex = getVersionIndexPath(assetPath)
     const content = JSON.stringify(metadata, null, 2)
-    await fs.writeFile(sidecar, content, "utf-8")
+    await fs.writeFile(verIndex, content, "utf-8")
   }
 
   /** Update metadata (merge with existing) */
@@ -63,11 +60,11 @@ export namespace AssetMetadata {
     return merged
   }
 
-  /** Delete metadata sidecar */
+  /** Delete all AI metadata (entire .ai.{filename}/ directory) */
   export async function remove(assetPath: string): Promise<void> {
-    const sidecar = sidecarPath(assetPath)
+    const verDir = getVersionDir(assetPath)
     try {
-      await fs.unlink(sidecar)
+      await fs.rm(verDir, { recursive: true, force: true })
     } catch {
       // Ignore if doesn't exist
     }
@@ -243,9 +240,8 @@ export namespace AssetMetadata {
 
   /** Check if asset has AI metadata */
   export async function exists(assetPath: string): Promise<boolean> {
-    const sidecar = sidecarPath(assetPath)
     try {
-      await fs.access(sidecar)
+      await fs.access(getVersionIndexPath(assetPath))
       return true
     } catch {
       return false

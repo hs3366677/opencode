@@ -1,10 +1,12 @@
 import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
+import { generateText } from "ai"
 import { lazy } from "../../util/lazy"
 import { AssetProviderRegistry } from "../../provider/asset"
 import { AssetProvider } from "../../provider/asset/asset-provider"
 import { AssetMetadata } from "../../provider/asset/metadata"
+import { Provider } from "../../provider/provider"
 import { Instance } from "../../project/instance"
 import path from "path"
 import fs from "fs/promises"
@@ -47,6 +49,77 @@ export const AIAssetRoutes = lazy(() =>
             supportedTypes: p.supportedTypes,
           })),
         )
+      },
+    )
+
+    .get(
+      "/providers/status",
+      describeRoute({
+        summary: "Asset provider status",
+        description: "Get status of all configured asset generation providers.",
+        operationId: "ai-assets.providers.status",
+        responses: {
+          200: {
+            description: "Provider status list",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.array(
+                    z.object({
+                      id: z.string(),
+                      name: z.string(),
+                      supportedTypes: z.array(AssetProvider.AssetType),
+                    }),
+                  ),
+                ),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        return c.json(AssetProviderRegistry.status())
+      },
+    )
+
+    .post(
+      "/providers/configure",
+      describeRoute({
+        summary: "Configure asset provider",
+        description: "Configure an asset generation provider at runtime with an API key.",
+        operationId: "ai-assets.providers.configure",
+        responses: {
+          200: {
+            description: "Configuration result",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.object({
+                    success: z.boolean(),
+                    error: z.string().optional(),
+                  }),
+                ),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "json",
+        z.object({
+          providerId: z.string(),
+          apiKey: z.string(),
+          apiUrl: z.string().optional(),
+        }),
+      ),
+      async (c) => {
+        const { providerId, apiKey, apiUrl } = c.req.valid("json" as never) as {
+          providerId: string
+          apiKey: string
+          apiUrl?: string
+        }
+        const result = await AssetProviderRegistry.configureProvider(providerId, apiKey, apiUrl)
+        return c.json(result)
       },
     )
 
@@ -111,7 +184,12 @@ export const AIAssetRoutes = lazy(() =>
             description: "Generation started",
             content: {
               "application/json": {
-                schema: resolver(AssetProvider.GenerationResult),
+                schema: resolver(
+                  AssetProvider.GenerationResult.extend({
+                    providerId: z.string(),
+                    model: z.string(),
+                  }),
+                ),
               },
             },
           },
@@ -129,9 +207,21 @@ export const AIAssetRoutes = lazy(() =>
       ),
       async (c) => {
         const body = c.req.valid("json" as never) as AssetProvider.GenerationRequest
-        const { provider, modelId } = await AssetProviderRegistry.resolveModel(body.type, body.model)
+        let resolved
+        try {
+          resolved = await AssetProviderRegistry.resolveModel(body.type, body.model)
+        } catch (e: any) {
+          return c.json({ error: e.message }, 400)
+        }
+        const { provider, modelId } = resolved
         const result = await provider.generate({ ...body, model: modelId })
-        return c.json(result)
+        return c.json({
+          generationId: result.generationId,
+          status: result.status,
+          estimatedTime: result.estimatedTime,
+          providerId: provider.id,
+          model: modelId,
+        })
       },
     )
 
@@ -293,7 +383,12 @@ export const AIAssetRoutes = lazy(() =>
             description: "Transform job started",
             content: {
               "application/json": {
-                schema: resolver(AssetProvider.GenerationResult),
+                schema: resolver(
+                  AssetProvider.GenerationResult.extend({
+                    providerId: z.string(),
+                    model: z.string().optional(),
+                  }),
+                ),
               },
             },
           },
@@ -326,7 +421,7 @@ export const AIAssetRoutes = lazy(() =>
         }
 
         const provider = providers[0]
-        const result = await provider.transform({
+        const result = await provider.transform!({
           sourceFile: Buffer.from(body.sourceBase64, "base64"),
           sourceType: body.sourceType,
           transform: body.transform,
@@ -335,7 +430,13 @@ export const AIAssetRoutes = lazy(() =>
           parameters: body.parameters,
         })
 
-        return c.json(result)
+        return c.json({
+          generationId: result.generationId,
+          status: result.status,
+          estimatedTime: result.estimatedTime,
+          providerId: provider.id,
+          model: body.model,
+        })
       },
     )
 
@@ -360,6 +461,70 @@ export const AIAssetRoutes = lazy(() =>
       }),
       async (c) => {
         return c.json(AssetProviderRegistry.supportedTypes())
+      },
+    )
+
+    // ── Prompt Refinement ──────────────────────────────────────────────
+
+    .post(
+      "/refine-prompt",
+      describeRoute({
+        summary: "Refine an asset generation prompt",
+        description:
+          "Use an LLM to refine an asset generation prompt based on user instructions.",
+        operationId: "ai-assets.refine-prompt",
+        responses: {
+          200: {
+            description: "Refined prompt",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.object({
+                    refinedPrompt: z.string(),
+                  }),
+                ),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "json",
+        z.object({
+          prompt: z.string(),
+          instruction: z.string(),
+          assetType: z.string().optional(),
+        }),
+      ),
+      async (c) => {
+        const { prompt, instruction, assetType } = c.req.valid("json" as never) as {
+          prompt: string
+          instruction: string
+          assetType?: string
+        }
+
+        const defaultModel = await Provider.defaultModel()
+        const model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
+        const language = await Provider.getLanguage(model)
+
+        const typeHint = assetType ? ` The asset type is "${assetType}".` : ""
+
+        const result = await generateText({
+          model: language,
+          messages: [
+            {
+              role: "system",
+              content: `You are an expert at writing prompts for AI asset generation in game development. The user will give you an existing prompt and an instruction for how to refine it. Return ONLY the refined prompt text — no explanations, no quotes, no markdown.${typeHint}`,
+            },
+            {
+              role: "user",
+              content: `Current prompt: ${prompt}\n\nInstruction: ${instruction}`,
+            },
+          ],
+          temperature: 0.3,
+        })
+
+        return c.json({ refinedPrompt: result.text.trim() })
       },
     )
 

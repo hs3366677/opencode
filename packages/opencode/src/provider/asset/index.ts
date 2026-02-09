@@ -4,6 +4,7 @@ import { AssetProvider } from "./asset-provider"
 import { MeshyProvider } from "./meshy"
 import { DoubaoProvider } from "./doubao"
 import { SunoProvider } from "./suno"
+import { ReplicateProvider } from "./replicate"
 
 /**
  * Central registry for asset generation providers.
@@ -24,6 +25,7 @@ export namespace AssetProviderRegistry {
     string,
     (config: { apiKey: string; apiUrl?: string }) => AssetProvider.Provider
   > = {
+    replicate: (config) => new ReplicateProvider(config),
     meshy: (config) => new MeshyProvider(config),
     doubao: (config) => new DoubaoProvider(config),
     suno: (config) => new SunoProvider(config),
@@ -34,10 +36,10 @@ export namespace AssetProviderRegistry {
     model: "meshy",
     mesh: "meshy",
     scene: "meshy",
-    texture: "doubao",
-    sprite: "doubao",
-    cubemap: "doubao",
-    material: "doubao",
+    texture: "replicate",
+    sprite: "replicate",
+    cubemap: "replicate",
+    material: "replicate",
     audio_sfx: "suno",
     audio_music: "suno",
   }
@@ -88,13 +90,13 @@ export namespace AssetProviderRegistry {
         continue
       }
 
-      // Resolve API key from env var
-      const envVar = providerConfig.api_key_env
-      const apiKey = envVar ? process.env[envVar] : undefined
+      // Resolve API key: direct key takes precedence over env var
+      const apiKey = providerConfig.api_key
+        ?? (providerConfig.api_key_env ? process.env[providerConfig.api_key_env] : undefined)
       if (!apiKey) {
         log.warn("asset provider missing API key", {
           id: providerId,
-          env: envVar ?? "(not configured)",
+          env: providerConfig.api_key_env ?? "(not configured)",
         })
         continue
       }
@@ -111,6 +113,46 @@ export namespace AssetProviderRegistry {
       count: providers.size,
       ids: Array.from(providers.keys()),
     })
+  }
+
+  // ── Runtime Configuration ─────────────────────────────────────────────
+
+  /**
+   * Configure and register a provider at runtime with a direct API key.
+   * Used by the Settings dialog and /connect chat command.
+   */
+  export async function configureProvider(
+    providerId: string,
+    apiKey: string,
+    apiUrl?: string,
+  ): Promise<{ success: boolean; error?: string }> {
+    const factory = BUILTIN_FACTORIES[providerId]
+    if (!factory) {
+      return { success: false, error: `Unknown provider: ${providerId}` }
+    }
+
+    const provider = factory({ apiKey, apiUrl })
+
+    // Validate the key if the provider supports it
+    if ("validateApiKey" in provider && typeof (provider as any).validateApiKey === "function") {
+      const valid = await (provider as any).validateApiKey()
+      if (!valid) {
+        return { success: false, error: "Invalid API key" }
+      }
+    }
+
+    register(provider)
+    log.info("asset provider configured at runtime", { id: providerId })
+    return { success: true }
+  }
+
+  /** Get status of all registered providers (with masked keys for display) */
+  export function status(): Array<{ id: string; name: string; supportedTypes: AssetProvider.AssetType[] }> {
+    return Array.from(providers.values()).map((p) => ({
+      id: p.id,
+      name: p.name,
+      supportedTypes: p.supportedTypes,
+    }))
   }
 
   // ── Model Discovery ──────────────────────────────────────────────────

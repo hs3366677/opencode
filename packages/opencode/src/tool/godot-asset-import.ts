@@ -8,7 +8,9 @@ import { AssetProvider } from "../provider/asset/asset-provider"
 
 const DESCRIPTION = `Import user-provided asset files into the Godot project with AI metadata tracking.
 
-This tool copies external files into the project directory and creates metadata sidecars
+Import user-provided asset files into the Godot project with AI metadata tracking.
+
+This tool copies external files into the project directory and creates metadata
 for tracking asset origin, enabling the AI assistant to understand and manage project assets.
 
 Use this tool when:
@@ -19,7 +21,7 @@ Use this tool when:
 The tool automatically:
 1. Detects the asset type from file extension
 2. Copies the file to the specified project destination
-3. Creates a .ai.json metadata sidecar marking it as "imported"
+3. Creates .ai.{filename}/metadata.json marking it as "imported"
 4. Returns the res:// path for use in Godot`
 
 export const GodotAssetImportTool = Tool.define("godot_asset_import", {

@@ -166,7 +166,7 @@ export namespace AssetProvider {
     transform(request: TransformRequest): Promise<GenerationResult>
   }
 
-  // ── Asset Metadata (stored in .ai.json sidecar) ─────────────────────
+  // ── Asset Metadata (stored in .ai.{filename}/metadata.json) ─────────
 
   export const AssetMetadata = z.object({
     origin: Origin,
@@ -211,6 +211,7 @@ export namespace AssetProvider {
 
   export const ProviderConfig = z.object({
     api_key_env: z.string().optional().describe("Environment variable name for API key"),
+    api_key: z.string().optional().describe("Direct API key (synced from editor settings)"),
     api_url: z.string().optional().describe("Override base API URL"),
     enabled: z.boolean().default(true),
     default_models: z

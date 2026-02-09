@@ -11,15 +11,16 @@ import type { AssetProvider } from "../provider/asset/asset-provider"
 // godot_asset_generate - Generate any asset type via configured provider
 // =============================================================================
 
-const GENERATE_DESCRIPTION = `Generate a new asset using AI providers (Meshy for 3D, Doubao for 2D, Suno for audio).
+const GENERATE_DESCRIPTION = `Generate REAL assets immediately using AI providers (requires provider configuration).
 
-This tool:
-1. Routes to the appropriate AI provider based on asset type
-2. Generates the asset from the given prompt
-3. Downloads and imports the result into the Godot project
-4. Creates metadata tracking generation parameters
+IMPORTANT: Do NOT use this tool for normal game development. Use godot_asset_create_placeholder instead.
 
-Use when the user wants to create new assets from text descriptions.`
+ONLY use this tool when:
+- User explicitly says "generate REAL assets NOW" or "generate with AI NOW"
+- AI providers are already configured
+- User has confirmed they want to wait for real AI generation (slow, costs money)
+
+For normal game development, ALWAYS use godot_asset_create_placeholder to create placeholders first.`
 
 export const GodotAssetGenerateTool = Tool.define("godot_asset_generate", {
   description: GENERATE_DESCRIPTION,
@@ -47,10 +48,11 @@ export const GodotAssetGenerateTool = Tool.define("godot_asset_generate", {
     parameters: z.record(z.string(), z.any()).optional().describe("Provider-specific parameters"),
   }),
   async execute(params, ctx) {
-    const registry = AssetProviderRegistry.getInstance()
-
     // 1. Resolve provider + model
-    const resolved = registry.resolveModel(params.type as AssetProvider.AssetType, params.model)
+    const resolved = await AssetProviderRegistry.resolveModel(
+      params.type as AssetProvider.AssetType,
+      params.model,
+    )
     if (!resolved) {
       return {
         title: "Generation failed",
@@ -152,15 +154,16 @@ export const GodotAssetGenerateTool = Tool.define("godot_asset_generate", {
 // godot_asset_create_placeholder - Create placeholder with pre-filled metadata
 // =============================================================================
 
-const PLACEHOLDER_DESCRIPTION = `Create a placeholder asset with pre-filled AI generation metadata.
+const PLACEHOLDER_DESCRIPTION = `Creates game asset placeholders (textures, sprites, 3D models, audio) that work immediately and can be AI-generated later.
 
-Use this when generating game code that needs assets - create placeholders that can be
-generated later. This allows the game to run immediately with placeholder visuals.
+WHEN TO USE: User requests ANY game asset - textures, sprites, images, sounds, music, models, meshes, etc.
 
-The placeholder:
-- Is a simple colored shape or empty resource
-- Contains full generation metadata (prompt, provider, model, parameters)
-- Can be generated later with /generate-assets or right-click menu`
+How it works:
+- Creates working placeholder immediately (colored rectangle, basic mesh, silent audio)
+- Stores your generation prompt for later AI generation
+- User can right-click asset in Godot to generate real version with AI
+
+DO NOT write GDScript code to generate images/textures programmatically. Use this tool instead.`
 
 export const GodotAssetCreatePlaceholderTool = Tool.define("godot_asset_create_placeholder", {
   description: PLACEHOLDER_DESCRIPTION,
@@ -180,7 +183,7 @@ export const GodotAssetCreatePlaceholderTool = Tool.define("godot_asset_create_p
         "font",
       ])
       .describe("Type of asset"),
-    destination: z.string().describe('Full res:// path including filename (e.g., "res://assets/knight/idle.png")'),
+    destination: z.string().describe('Full res:// path including filename (e.g., "res://assets/knight/idle.png" for images, "res://assets/mesh.tres" for models)'),
     prompt: z.string().describe("Generation prompt to use when generating"),
     negative_prompt: z.string().optional().describe("What to avoid"),
     provider: z.string().optional().describe("Override default provider"),
@@ -193,8 +196,18 @@ export const GodotAssetCreatePlaceholderTool = Tool.define("godot_asset_create_p
       .describe("Category for placeholder color"),
   }),
   async execute(params, ctx) {
-    const registry = AssetProviderRegistry.getInstance()
-    const resolved = registry.resolveModel(params.type as AssetProvider.AssetType, params.model)
+    // Try to resolve provider/model, but don't fail if providers aren't configured
+    // Placeholders can be created without providers - they'll be generated later
+    let resolved: { provider: AssetProvider.Provider; modelId: string } | undefined
+    try {
+      resolved = await AssetProviderRegistry.resolveModel(
+        params.type as AssetProvider.AssetType,
+        params.model,
+      )
+    } catch (error) {
+      // No providers configured - that's OK for placeholders
+      ctx.metadata({ title: "Creating placeholder (providers not configured)" })
+    }
 
     const projectRoot = Instance.directory
     let destPath = params.destination
@@ -210,6 +223,13 @@ export const GodotAssetCreatePlaceholderTool = Tool.define("godot_asset_create_p
       params.type as AssetProvider.AssetType,
       params.category ?? "default",
     )
+
+    // For non-image types (model, scene, shader, etc.), the placeholder uses a
+    // different extension (.tres, .tscn, .gdshader). Correct if needed.
+    const requestedExt = path.extname(destPath)
+    if (requestedExt !== placeholder.extension) {
+      destPath = destPath.slice(0, -requestedExt.length) + placeholder.extension
+    }
 
     // Write placeholder file
     await fs.writeFile(destPath, placeholder.content)
@@ -293,9 +313,8 @@ export const GodotAssetRegenerateTool = Tool.define("godot_asset_regenerate", {
     }
 
     // 2. Merge parameters
-    const registry = AssetProviderRegistry.getInstance()
     const providerId = existingMeta.provider
-    const provider = registry.getProvider(providerId!)
+    const provider = AssetProviderRegistry.get(providerId!)
     if (!provider) {
       return {
         title: "Regeneration failed",
@@ -415,13 +434,11 @@ export const GodotAssetTransformTool = Tool.define("godot_asset_transform", {
     }
 
     // Find provider that supports this transform
-    const registry = AssetProviderRegistry.getInstance()
-    const resolved = registry.resolveTransformProvider(
+    const providers = AssetProviderRegistry.findTransformProviders(
       params.transform as AssetProvider.TransformType,
-      params.model,
     )
 
-    if (!resolved) {
+    if (providers.length === 0) {
       return {
         title: "Transform failed",
         metadata: { error: "no_provider" },
@@ -429,7 +446,13 @@ export const GodotAssetTransformTool = Tool.define("godot_asset_transform", {
       }
     }
 
-    const { provider, modelId } = resolved
+    const provider = providers[0]
+    // Use provided model or get first available model from provider
+    let modelId = params.model
+    if (!modelId) {
+      const models = await provider.listModels()
+      modelId = models.length > 0 ? models[0].id : ""
+    }
 
     // Execute transform
     ctx.metadata({ title: `Transforming (${params.transform})...` })
@@ -453,8 +476,8 @@ export const GodotAssetTransformTool = Tool.define("godot_asset_transform", {
     if (status.status === "failed") {
       return {
         title: "Transform failed",
-        metadata: { error: status.message },
-        output: `Transform failed: ${status.message}`,
+        metadata: { error: status.message || "Unknown error" },
+        output: `Transform failed: ${status.message || "Unknown error"}`,
       }
     }
 
@@ -572,10 +595,8 @@ export const GodotAssetListModelsTool = Tool.define("godot_asset_list_models", {
       .describe("Filter by asset type"),
   }),
   async execute(params, ctx) {
-    const registry = AssetProviderRegistry.getInstance()
-
     if (params.provider) {
-      const models = await registry.listModels(params.provider)
+      const models = await AssetProviderRegistry.listModels(params.provider)
       return {
         title: `Models for ${params.provider}`,
         metadata: { provider: params.provider, count: models.length },
@@ -583,7 +604,7 @@ export const GodotAssetListModelsTool = Tool.define("godot_asset_list_models", {
       }
     }
 
-    const allModels = await registry.listAllModels()
+    const allModels = await AssetProviderRegistry.listAllModels()
 
     if (params.type) {
       // Filter to models that support this type
@@ -617,15 +638,15 @@ function generatePlaceholderContent(
   type: AssetProvider.AssetType,
   category: string,
 ): { content: Buffer; extension: string } {
-  // Color map for placeholder textures
+  // Color map for placeholder textures (0-255 RGBA)
   const categoryColors: Record<string, [number, number, number, number]> = {
-    character: [1, 0, 1, 1], // Magenta
-    environment: [0, 0.8, 0, 1], // Green
-    ui: [0, 1, 1, 1], // Cyan
-    item: [1, 0.5, 0, 1], // Orange
-    effect: [1, 1, 0, 1], // Yellow
-    skybox: [0.2, 0.4, 1, 1], // Blue
-    default: [0.6, 0.6, 0.6, 1], // Gray
+    character: [255, 0, 255, 255], // Magenta
+    environment: [0, 204, 0, 255], // Green
+    ui: [0, 255, 255, 255], // Cyan
+    item: [255, 128, 0, 255], // Orange
+    effect: [255, 255, 0, 255], // Yellow
+    skybox: [51, 102, 255, 255], // Blue
+    default: [153, 153, 153, 255], // Gray
   }
 
   const color = categoryColors[category] ?? categoryColors.default
@@ -634,24 +655,13 @@ function generatePlaceholderContent(
     case "texture":
     case "sprite":
     case "cubemap": {
-      // GradientTexture2D placeholder
-      const tres = `[gd_resource type="GradientTexture2D" format=3]
-
-[sub_resource type="Gradient" id="1"]
-colors = PackedColorArray(${color.join(", ")})
-
-[resource]
-gradient = SubResource("1")
-width = 64
-height = 64
-fill = 1
-`
-      return { content: Buffer.from(tres), extension: ".tres" }
+      // Generate a real 64x64 PNG with the category color
+      return { content: generateSolidPNG(64, 64, color), extension: ".png" }
     }
 
     case "model":
     case "mesh": {
-      // BoxMesh placeholder
+      // BoxMesh placeholder (native Godot resource)
       const tres = `[gd_resource type="BoxMesh" format=3]
 
 [resource]
@@ -674,7 +684,7 @@ mesh = SubResource("1")
 
     case "audio_sfx":
     case "audio_music": {
-      // Empty audio stream
+      // Empty audio stream (native Godot resource)
       const tres = `[gd_resource type="AudioStreamGenerator" format=3]
 
 [resource]
@@ -683,20 +693,22 @@ mesh = SubResource("1")
     }
 
     case "shader": {
+      const colorF = color.map((c) => (c / 255).toFixed(2))
       const gdshader = `shader_type spatial;
 
 void fragment() {
-    ALBEDO = vec3(${color[0]}, ${color[1]}, ${color[2]});
+    ALBEDO = vec3(${colorF[0]}, ${colorF[1]}, ${colorF[2]});
 }
 `
       return { content: Buffer.from(gdshader), extension: ".gdshader" }
     }
 
     case "material": {
+      const colorF = color.map((c) => (c / 255).toFixed(2))
       const tres = `[gd_resource type="StandardMaterial3D" format=3]
 
 [resource]
-albedo_color = Color(${color.join(", ")})
+albedo_color = Color(${colorF.join(", ")})
 `
       return { content: Buffer.from(tres), extension: ".tres" }
     }
@@ -713,4 +725,72 @@ albedo_color = Color(${color.join(", ")})
       return { content: Buffer.from(""), extension: ".txt" }
     }
   }
+}
+
+/** Generate a minimal valid PNG file filled with a solid RGBA color. */
+function generateSolidPNG(
+  width: number,
+  height: number,
+  color: [number, number, number, number],
+): Buffer {
+  const { deflateSync } = require("zlib") as typeof import("zlib")
+
+  // Build raw image data: filter byte (0) + RGBA pixels per row
+  const rowSize = 1 + width * 4
+  const rawData = Buffer.alloc(rowSize * height)
+  for (let y = 0; y < height; y++) {
+    const offset = y * rowSize
+    rawData[offset] = 0 // No filter
+    for (let x = 0; x < width; x++) {
+      const px = offset + 1 + x * 4
+      rawData[px] = color[0]
+      rawData[px + 1] = color[1]
+      rawData[px + 2] = color[2]
+      rawData[px + 3] = color[3]
+    }
+  }
+
+  const compressed = deflateSync(rawData)
+
+  // PNG chunks
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+
+  // IHDR: width, height, bit depth 8, color type 6 (RGBA)
+  const ihdrData = Buffer.alloc(13)
+  ihdrData.writeUInt32BE(width, 0)
+  ihdrData.writeUInt32BE(height, 4)
+  ihdrData[8] = 8 // bit depth
+  ihdrData[9] = 6 // color type: RGBA
+  ihdrData[10] = 0 // compression
+  ihdrData[11] = 0 // filter
+  ihdrData[12] = 0 // interlace
+  const ihdr = pngChunk("IHDR", ihdrData)
+
+  const idat = pngChunk("IDAT", compressed)
+  const iend = pngChunk("IEND", Buffer.alloc(0))
+
+  return Buffer.concat([signature, ihdr, idat, iend])
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(data.length, 0)
+  const typeBuffer = Buffer.from(type, "ascii")
+  const crcInput = Buffer.concat([typeBuffer, data])
+  const crcValue = Buffer.alloc(4)
+  // Use a simple CRC32 implementation for PNG chunks
+  crcValue.writeUInt32BE(crc32PNG(crcInput) >>> 0, 0)
+  return Buffer.concat([length, typeBuffer, data, crcValue])
+}
+
+/** CRC32 for PNG (ISO 3309 / ITU-T V.42) */
+function crc32PNG(buf: Buffer): number {
+  let crc = 0xffffffff
+  for (let i = 0; i < buf.length; i++) {
+    crc ^= buf[i]
+    for (let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0
 }
