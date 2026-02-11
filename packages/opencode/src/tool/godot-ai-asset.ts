@@ -183,7 +183,7 @@ export const GodotAssetCreatePlaceholderTool = Tool.define("godot_asset_create_p
         "font",
       ])
       .describe("Type of asset"),
-    destination: z.string().describe('Full res:// path including filename (e.g., "res://assets/knight/idle.png" for images, "res://assets/mesh.tres" for models)'),
+    destination: z.string().describe('Full res:// path including filename (e.g., "res://assets/knight/idle.png" for images, "res://assets/knight/mesh/model.glb" for 3D models)'),
     prompt: z.string().describe("Generation prompt to use when generating"),
     negative_prompt: z.string().optional().describe("What to avoid"),
     provider: z.string().optional().describe("Override default provider"),
@@ -660,26 +660,11 @@ function generatePlaceholderContent(
     }
 
     case "model":
-    case "mesh": {
-      // BoxMesh placeholder (native Godot resource)
-      const tres = `[gd_resource type="BoxMesh" format=3]
-
-[resource]
-size = Vector3(1, 1, 1)
-`
-      return { content: Buffer.from(tres), extension: ".tres" }
-    }
-
+    case "mesh":
     case "scene": {
-      // Simple scene with MeshInstance3D
-      const tscn = `[gd_scene format=3]
-
-[sub_resource type="BoxMesh" id="1"]
-
-[node name="Placeholder" type="MeshInstance3D"]
-mesh = SubResource("1")
-`
-      return { content: Buffer.from(tscn), extension: ".tscn" }
+      // GLB placeholder — matches the format Meshy generates,
+      // so no extension mismatch when replacing placeholder with real asset.
+      return { content: generateBoxGLB(color), extension: ".glb" }
     }
 
     case "audio_sfx":
@@ -725,6 +710,129 @@ albedo_color = Color(${colorF.join(", ")})
       return { content: Buffer.from(""), extension: ".txt" }
     }
   }
+}
+
+/**
+ * Generate a minimal valid GLB (glTF Binary) file containing a colored unit box.
+ *
+ * Layout: 24 vertices (4 per face with normals), 36 indices, PBR material
+ * with the given base color. Godot imports this natively as a PackedScene.
+ */
+function generateBoxGLB(color: [number, number, number, number]): Buffer {
+  // ── Mesh data ──────────────────────────────────────────────────────────
+  // Unit box: 6 faces × 4 vertices = 24 vertices, 6 faces × 2 triangles × 3 = 36 indices
+  const positions = new Float32Array([
+    // +X face
+    0.5, -0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, 0.5,
+    // -X face
+    -0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, 0.5, -0.5, -0.5, -0.5, -0.5,
+    // +Y face
+    -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, -0.5,
+    // -Y face
+    -0.5, -0.5, 0.5, -0.5, -0.5, -0.5, 0.5, -0.5, -0.5, 0.5, -0.5, 0.5,
+    // +Z face
+    -0.5, -0.5, 0.5, 0.5, -0.5, 0.5, 0.5, 0.5, 0.5, -0.5, 0.5, 0.5,
+    // -Z face
+    0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5,
+  ])
+
+  const normals = new Float32Array([
+    1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0,
+    -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0,
+    0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0,
+    0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0,
+    0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+    0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1,
+  ])
+
+  const indices = new Uint16Array([
+    0, 1, 2, 0, 2, 3,
+    4, 5, 6, 4, 6, 7,
+    8, 9, 10, 8, 10, 11,
+    12, 13, 14, 12, 14, 15,
+    16, 17, 18, 16, 18, 19,
+    20, 21, 22, 20, 22, 23,
+  ])
+
+  const posBuf = Buffer.from(positions.buffer)
+  const normBuf = Buffer.from(normals.buffer)
+  const idxBuf = Buffer.from(indices.buffer)
+
+  // Pad each buffer to 4-byte alignment
+  const pad = (n: number) => (4 - (n % 4)) % 4
+  const binBody = Buffer.concat([
+    posBuf, Buffer.alloc(pad(posBuf.length)),
+    normBuf, Buffer.alloc(pad(normBuf.length)),
+    idxBuf, Buffer.alloc(pad(idxBuf.length)),
+  ])
+
+  const posOff = 0
+  const posLen = posBuf.length
+  const normOff = posLen + pad(posLen)
+  const normLen = normBuf.length
+  const idxOff = normOff + normLen + pad(normLen)
+  const idxLen = idxBuf.length
+
+  // ── glTF JSON ──────────────────────────────────────────────────────────
+  const baseColor = [color[0] / 255, color[1] / 255, color[2] / 255, color[3] / 255]
+
+  const gltf = {
+    asset: { version: "2.0", generator: "makabaka-engine" },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0, name: "Placeholder" }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, indices: 2, material: 0 }] }],
+    materials: [{
+      pbrMetallicRoughness: {
+        baseColorFactor: baseColor,
+        metallicFactor: 0,
+        roughnessFactor: 0.8,
+      },
+      name: "placeholder",
+    }],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 24, type: "VEC3", max: [0.5, 0.5, 0.5], min: [-0.5, -0.5, -0.5] },
+      { bufferView: 1, componentType: 5126, count: 24, type: "VEC3" },
+      { bufferView: 2, componentType: 5123, count: 36, type: "SCALAR" },
+    ],
+    bufferViews: [
+      { buffer: 0, byteOffset: posOff, byteLength: posLen, target: 34962 },
+      { buffer: 0, byteOffset: normOff, byteLength: normLen, target: 34962 },
+      { buffer: 0, byteOffset: idxOff, byteLength: idxLen, target: 34963 },
+    ],
+    buffers: [{ byteLength: binBody.length }],
+  }
+
+  // JSON chunk (pad to 4-byte with spaces)
+  let jsonStr = JSON.stringify(gltf)
+  while (jsonStr.length % 4 !== 0) jsonStr += " "
+  const jsonBuf = Buffer.from(jsonStr, "utf8")
+
+  // ── GLB assembly ───────────────────────────────────────────────────────
+  const headerLen = 12
+  const jsonChunkLen = 8 + jsonBuf.length
+  const binChunkLen = 8 + binBody.length
+  const totalLen = headerLen + jsonChunkLen + binChunkLen
+
+  const out = Buffer.alloc(totalLen)
+  let off = 0
+
+  // Header: magic, version, length
+  out.writeUInt32LE(0x46546c67, off); off += 4 // "glTF"
+  out.writeUInt32LE(2, off); off += 4           // version
+  out.writeUInt32LE(totalLen, off); off += 4    // total length
+
+  // JSON chunk
+  out.writeUInt32LE(jsonBuf.length, off); off += 4
+  out.writeUInt32LE(0x4e4f534a, off); off += 4 // "JSON"
+  jsonBuf.copy(out, off); off += jsonBuf.length
+
+  // BIN chunk
+  out.writeUInt32LE(binBody.length, off); off += 4
+  out.writeUInt32LE(0x004e4942, off); off += 4 // "BIN\0"
+  binBody.copy(out, off)
+
+  return out
 }
 
 /** Generate a minimal valid PNG file filled with a solid RGBA color. */
