@@ -214,7 +214,12 @@ export const AIAssetRoutes = lazy(() =>
           return c.json({ error: e.message }, 400)
         }
         const { provider, modelId } = resolved
-        const result = await provider.generate({ ...body, model: modelId })
+        let result
+        try {
+          result = await provider.generate({ ...body, model: modelId })
+        } catch (e: any) {
+          return c.json({ error: `Generation failed (${provider.id}): ${e.message}` }, 500)
+        }
         return c.json({
           generationId: result.generationId,
           status: result.status,
