@@ -28,6 +28,8 @@ import { Truncate } from "./truncation"
 import { PlanExitTool, PlanEnterTool } from "./plan"
 import { ApplyPatchTool } from "./apply_patch"
 import { GodotAssetImportTool, GodotAssetImportBatchTool } from "./godot-asset-import"
+import { GodotEditorCommandTool } from "./godot-editor-command"
+import { GodotScreenshotTool } from "./godot-screenshot"
 import {
   GodotAssetGenerateTool,
   GodotAssetCreatePlaceholderTool,
@@ -136,6 +138,8 @@ export namespace ToolRegistry {
       GodotAssetTransformTool,
       GodotAssetRefinePromptTool,
       GodotAssetListModelsTool,
+      GodotEditorCommandTool,
+      GodotScreenshotTool,
       ...custom,
     ]
   }
