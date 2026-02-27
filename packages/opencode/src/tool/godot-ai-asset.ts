@@ -6,6 +6,8 @@ import { Instance } from "../project/instance"
 import { AssetMetadata } from "../provider/asset/metadata"
 import { AssetProviderRegistry } from "../provider/asset"
 import type { AssetProvider } from "../provider/asset/asset-provider"
+import { readProfile, writeProfile } from "../provider/asset/style-profile"
+import type { StyleProfile } from "../provider/asset/style-profile"
 
 // =============================================================================
 // godot_asset_generate - Generate any asset type via configured provider
@@ -46,12 +48,39 @@ export const GodotAssetGenerateTool = Tool.define("godot_asset_generate", {
     provider: z.string().optional().describe("Override the default provider for this type"),
     model: z.string().optional().describe("Override the default model for this type"),
     parameters: z.record(z.string(), z.any()).optional().describe("Provider-specific parameters"),
+    style_reference: z.string().optional().describe("res:// path to override the project style reference image"),
+    use_project_style: z.boolean().optional().describe("Set to false to skip auto-injecting project style profile (default: true)"),
   }),
   async execute(params, ctx) {
-    // 1. Resolve provider + model
+    // 0. Inject project style profile (if available and not explicitly disabled)
+    let effectivePrompt = params.prompt
+    let effectiveModel = params.model
+    let effectiveParameters = params.parameters ?? {}
+
+    if (params.use_project_style !== false) {
+      const projectRoot = Instance.directory
+      const profile = readProfile(projectRoot)
+      if (profile) {
+        // Prepend art direction to prompt
+        if (profile.art_direction) {
+          effectivePrompt = `${profile.art_direction}. ${effectivePrompt}`
+        }
+        // Inject reference image for consistency (prefer explicit override)
+        const refAsset = params.style_reference ?? profile.reference_asset
+        if (refAsset && !effectiveParameters.input_image) {
+          effectiveParameters = { ...effectiveParameters, input_image: refAsset }
+        }
+        // Use consistency model if no model specified
+        if (!effectiveModel && profile.consistency_model) {
+          effectiveModel = profile.consistency_model
+        }
+      }
+    }
+
+    // 1. Resolve provider + model (use effectiveModel which may have been set from profile)
     const resolved = await AssetProviderRegistry.resolveModel(
       params.type as AssetProvider.AssetType,
-      params.model,
+      effectiveModel,
     )
     if (!resolved) {
       return {
@@ -68,10 +97,10 @@ export const GodotAssetGenerateTool = Tool.define("godot_asset_generate", {
 
     const result = await provider.generate({
       type: params.type as AssetProvider.AssetType,
-      prompt: params.prompt,
+      prompt: effectivePrompt,
       negativePrompt: params.negative_prompt,
       model: modelId,
-      parameters: params.parameters ?? {},
+      parameters: effectiveParameters,
     })
 
     // 3. Poll until complete
@@ -122,12 +151,12 @@ export const GodotAssetGenerateTool = Tool.define("godot_asset_generate", {
       const metadata: AssetProvider.AssetMetadata = {
         origin: "generated",
         asset_type: asset.type,
-        prompt: params.prompt,
+        prompt: effectivePrompt,
         negative_prompt: params.negative_prompt,
         provider: provider.id,
         model: modelId,
         generation_id: result.generationId,
-        parameters: params.parameters,
+        parameters: effectiveParameters,
         created_at: new Date().toISOString(),
         version: 1,
         bundle_id: bundle.assets.length > 1 ? bundle.bundleId : undefined,
@@ -626,6 +655,589 @@ export const GodotAssetListModelsTool = Tool.define("godot_asset_list_models", {
       title: "All AI models",
       metadata: { providers: Object.keys(allModels) },
       output: JSON.stringify(allModels, null, 2),
+    }
+  },
+})
+
+// =============================================================================
+// godot_worldbuilding - Save worldbuilding dialogue results
+// =============================================================================
+
+const WORLDBUILDING_DESCRIPTION = `Save the worldbuilding results from the conversation to docs/worldbuilding.md.
+
+Call this AFTER completing the 3-question worldbuilding dialogue with the user.
+This tool saves a structured world bible and returns a condensed visual prompt
+that godot_art_explore will use to generate world-specific concept art.
+
+Do NOT call this before asking the user the worldbuilding questions.`
+
+export const GodotWorldbuildingTool = Tool.define("godot_worldbuilding", {
+  description: WORLDBUILDING_DESCRIPTION,
+  parameters: z.object({
+    world_name: z.string().describe("Name of this game world"),
+    central_lie: z.string().describe("The world's biggest lie — official narrative vs hidden truth"),
+    core_tension: z.string().describe("The fundamental conflict arising from the lie"),
+    protagonist_hook: z.string().describe("Specific personal situation forcing the protagonist to act"),
+    world_rule: z.string().describe("The world's most unique currency, law, or mechanic"),
+    key_imagery: z.array(z.string()).describe("5-7 specific visual objects/symbols from this world"),
+    sensory_signature: z.string().describe("Dominant sensory impression — smell, sound, temperature"),
+    visual_taboos: z.array(z.string()).optional().describe("Visual elements that must NEVER appear in this world's art"),
+  }),
+  async execute(params, ctx) {
+    const projectRoot = Instance.directory
+    const docsDir = path.join(projectRoot, "docs")
+    await fs.mkdir(docsDir, { recursive: true })
+
+    // Build worldbuilding.md
+    const sections = [
+      `# ${params.world_name} — World Bible\n`,
+      `## The Lie\n${params.central_lie}\n`,
+      `## Core Tension\n${params.core_tension}\n`,
+      `## Protagonist\n${params.protagonist_hook}\n`,
+      `## World Rule\n${params.world_rule}\n`,
+      `## Key Imagery\n${params.key_imagery.map((i) => `- ${i}`).join("\n")}\n`,
+      `## Sensory Signature\n${params.sensory_signature}\n`,
+    ]
+    if (params.visual_taboos?.length) {
+      sections.push(`## Visual Taboos\n${params.visual_taboos.map((t) => `- NEVER: ${t}`).join("\n")}\n`)
+    }
+    const md = sections.join("\n")
+
+    const wbPath = path.join(docsDir, "worldbuilding.md")
+    await fs.writeFile(wbPath, md)
+
+    // Condensed English visual prompt for image generation
+    const worldPrompt = [
+      params.sensory_signature,
+      `key imagery: ${params.key_imagery.join(", ")}`,
+      params.visual_taboos?.length ? `forbidden: ${params.visual_taboos.join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join(", ")
+
+    return {
+      title: `Worldbuilding saved: ${params.world_name}`,
+      metadata: { world_name: params.world_name, world_prompt: worldPrompt },
+      output: `Saved worldbuilding to docs/worldbuilding.md\n\nVisual prompt for art explore:\n"${worldPrompt}"\n\nProceed to visual language discussion, then call godot_art_explore.`,
+    }
+  },
+})
+
+// =============================================================================
+// godot_art_explore - Generate multi-style gameplay scene explorations
+// =============================================================================
+
+const ART_EXPLORE_DESCRIPTION = `Generate 4 gameplay scene concept art in different styles, informed by the project's worldbuilding.
+
+IMPORTANT: Before calling this tool, the worldbuilding phase MUST be complete:
+1. User answered 3 worldbuilding questions (central lie, protagonist hook, world rule)
+2. godot_worldbuilding was called to save results to docs/worldbuilding.md
+3. Visual language was discussed (color mood, symbols, taboos)
+If docs/worldbuilding.md doesn't exist, warn the user and complete worldbuilding first.
+
+If worldbuilding_context is not provided, reads docs/worldbuilding.md automatically.
+Each image shows a realistic game screenshot mockup in a specific art style.
+After generating, ask the user which style they prefer, then use godot_art_confirm.`
+
+export const GodotArtExploreTool = Tool.define("godot_art_explore", {
+  description: ART_EXPLORE_DESCRIPTION,
+  parameters: z.object({
+    game_description: z.string().describe("Brief description of the game theme, e.g. 'dark dungeon card game'"),
+    gameplay_mechanics: z.string().describe("Core gameplay mechanics, e.g. 'card hand + turn-based combat + dungeon exploration'"),
+    num_styles: z.number().optional().describe("Number of style variants to generate (default: 4)"),
+    styles: z.array(z.string()).optional().describe("Explicit style names to use (overrides auto-selection)"),
+    model: z.string().optional().describe("Image generation model to use (default: flux-2-dev). Options: flux-2-dev, flux-2-pro, flux-schnell, flux-kontext-pro, flux-kontext-max, sd-3.5-medium, sd-3.5-large-turbo, sdxl"),
+    worldbuilding_context: z.string().optional().describe("Condensed world visual prompt from godot_worldbuilding. If omitted, reads docs/worldbuilding.md"),
+  }),
+  async execute(params, ctx) {
+    const numStyles = params.num_styles ?? 4
+    const projectRoot = Instance.directory
+
+    // Load worldbuilding context for richer prompts
+    let worldContext = params.worldbuilding_context ?? ""
+    if (!worldContext) {
+      try {
+        const wbContent = await fs.readFile(path.join(projectRoot, "docs", "worldbuilding.md"), "utf-8")
+        const imageryMatch = wbContent.match(/## Key Imagery\n([\s\S]*?)(?=\n##|$)/)
+        const sensoryMatch = wbContent.match(/## Sensory Signature\n([\s\S]*?)(?=\n##|$)/)
+        const taboosMatch = wbContent.match(/## Visual Taboos\n([\s\S]*?)(?=\n##|$)/)
+        const parts: string[] = []
+        if (sensoryMatch) parts.push(sensoryMatch[1].trim())
+        if (imageryMatch) {
+          parts.push(
+            "key imagery: " +
+              imageryMatch[1]
+                .replace(/^- /gm, "")
+                .trim()
+                .split("\n")
+                .join(", "),
+          )
+        }
+        if (taboosMatch) {
+          parts.push(
+            "forbidden: " +
+              taboosMatch[1]
+                .replace(/^- NEVER: /gm, "")
+                .trim()
+                .split("\n")
+                .join(", "),
+          )
+        }
+        worldContext = parts.join(", ")
+      } catch {
+        /* no worldbuilding yet — proceed with game_description only */
+      }
+    }
+
+    // Infer scene layout template from gameplay mechanics
+    const layout = inferSceneLayout(params.gameplay_mechanics)
+
+    // Default style set for exploration
+    const defaultStyles = [
+      "16-bit pixel art retro game screenshot",
+      "hand-drawn ink and watercolor game UI mockup",
+      "vector flat design minimalist game screen",
+      "painterly concept art stylized game scene",
+    ]
+    const styleList = params.styles ?? defaultStyles.slice(0, numStyles)
+
+    // Ensure output directory exists
+    const explorationDir = path.join(projectRoot, "assets", ".art_exploration")
+    await fs.mkdir(explorationDir, { recursive: true })
+
+    const results: Array<{ style: string; resPath: string; status: string }> = []
+
+    // Resolve provider — use user-specified model or default to flux-2-dev
+    const resolved = await AssetProviderRegistry.resolveModel("texture", params.model ?? "flux-2-dev")
+    if (!resolved) {
+      return {
+        title: "Art explore failed",
+        metadata: { error: "no_provider" },
+        output: "Error: No image provider configured. Please configure a Replicate API key.",
+      }
+    }
+
+    ctx.metadata({ title: `Generating style explorations (0/${styleList.length})...` })
+
+    for (let i = 0; i < styleList.length; i++) {
+      const style = styleList[i]
+      const prompt = buildExplorationPrompt(style, layout, params.game_description, worldContext)
+      const filename = `style_${i + 1}.png`
+      const destPath = path.join(explorationDir, filename)
+      const resPath = `res://assets/.art_exploration/${filename}`
+
+      ctx.metadata({ title: `Generating style ${i + 1}/${styleList.length}: ${style.split(" ").slice(0, 3).join(" ")}...` })
+
+      try {
+        const result = await resolved.provider.generate({
+          type: "texture",
+          prompt,
+          model: resolved.modelId,
+          parameters: { aspect_ratio: "16:9" },
+        })
+
+        // Poll until complete
+        let status = result
+        while (status.status === "pending" || status.status === "processing") {
+          await new Promise((resolve) => setTimeout(resolve, 2000))
+          status = await resolved.provider.checkStatus(result.generationId)
+          if (ctx.abort.aborted) break
+        }
+
+        if (status.status === "completed") {
+          const bundle = await resolved.provider.download(result.generationId)
+          if (bundle.assets.length > 0) {
+            await fs.writeFile(destPath, bundle.assets[0].data)
+            results.push({ style, resPath, status: "ready" })
+            ctx.metadata({ title: `Style ${i + 1}/${styleList.length} done ✓ — generating next...` })
+          }
+        } else {
+          results.push({ style, resPath, status: "failed" })
+          ctx.metadata({ title: `Style ${i + 1}/${styleList.length} failed — continuing...` })
+        }
+      } catch (err: any) {
+        results.push({ style, resPath, status: `error: ${err.message}` })
+        ctx.metadata({ title: `Style ${i + 1}/${styleList.length} error — continuing...` })
+      }
+    }
+
+    const readyCount = results.filter((r) => r.status === "ready").length
+    const styleList2 = results.map((r, i) => `  Style ${i + 1} (${r.style.split(" ").slice(0, 3).join(" ")}) → ${r.resPath} [${r.status}]`).join("\n")
+
+    return {
+      title: `Generated ${readyCount}/${styleList.length} style explorations`,
+      metadata: { explorations: results },
+      output: `Generated ${readyCount} gameplay scene explorations (${params.game_description}):\n${styleList2}\n\nEach image shows how the style looks in an actual game scene with UI.\nView in the FileSystem dock under res://assets/.art_exploration/\nTell me which style number you prefer (1-${styleList.length}).`,
+    }
+  },
+})
+
+/** Infer a gameplay scene layout description from mechanics text */
+function inferSceneLayout(mechanics: string): string {
+  const lower = mechanics.toLowerCase()
+  if (lower.includes("card") || lower.includes("deck")) {
+    return "game screenshot: bottom hand of 5 cards with icons and numbers, central battle arena with enemy sprite on right, hero portrait on left, health bars and mana orbs at top, turn indicator, dungeon stone background"
+  }
+  if (lower.includes("platform") || lower.includes("jump")) {
+    return "game screenshot: side-scrolling platformer level, layered background parallax, platforms and terrain, character sprite mid-jump, coins and items scattered, HUD at top with hearts and score"
+  }
+  if (lower.includes("tower defense") || lower.includes("td")) {
+    return "game screenshot: top-down map with winding path, grid for tower placement, enemy wave approaching along path, 3 different tower types placed, wave counter and gold display at top"
+  }
+  if (lower.includes("rpg") || lower.includes("dungeon") || lower.includes("roguelike")) {
+    return "game screenshot: top-down dungeon room with grid tiles, character sprite, 2 enemy sprites, room walls and doors, stats panel on right with HP/inventory, minimap corner"
+  }
+  if (lower.includes("puzzle")) {
+    return "game screenshot: puzzle grid center screen, colorful tiles or objects, move counter and score at top, next piece preview, clean UI with level indicator"
+  }
+  if (lower.includes("shoot") || lower.includes("bullet")) {
+    return "game screenshot: top-down or side-scrolling shooter, player ship/character, several enemy sprites, bullet patterns visible, health bar and score at top"
+  }
+  // Generic fallback
+  return "game screenshot: gameplay scene with player character, interactive elements, game UI with health/score/status bars at top, clean and readable interface"
+}
+
+/** Build a gameplay scene exploration prompt for a given style */
+function buildExplorationPrompt(style: string, layout: string, theme: string, worldContext?: string): string {
+  const worldPart = worldContext ? `${theme}, ${worldContext}` : `${theme} theme`
+  return `${style}, ${worldPart}, ${layout}, placeholder UI text and numbers visible, game-ready composition, readable at screen resolution`
+}
+
+// =============================================================================
+// godot_art_confirm - Read chosen style image for LLM vision analysis
+// =============================================================================
+
+const ART_CONFIRM_DESCRIPTION = `Read the user's chosen style exploration image and return it for visual analysis.
+
+After the user selects a style number from godot_art_explore results, call this tool with the chosen image path. The tool returns the image content so you (the LLM) can analyze it with vision to:
+1. Extract color palette (HEX values)
+2. Describe line style, lighting rules, character proportions
+3. Write docs/visual_bible.md with these rules
+4. Call godot_style_set to save the style profile
+
+This tool MUST be followed by writing visual_bible.md and calling godot_style_set.`
+
+export const GodotArtConfirmTool = Tool.define("godot_art_confirm", {
+  description: ART_CONFIRM_DESCRIPTION,
+  parameters: z.object({
+    chosen_path: z.string().describe("res:// path to the chosen exploration image"),
+    game_description: z.string().describe("Game description for context"),
+  }),
+  async execute(params, ctx) {
+    const projectRoot = Instance.directory
+    let absPath = params.chosen_path
+    if (absPath.startsWith("res://")) {
+      absPath = path.join(projectRoot, absPath.slice(6))
+    }
+
+    try {
+      const imgData = await fs.readFile(absPath)
+      const base64 = imgData.toString("base64")
+      const dataUrl = `data:image/png;base64,${base64}`
+
+      return {
+        title: `Loaded style reference: ${path.basename(absPath)}`,
+        metadata: {
+          chosen_path: params.chosen_path,
+          game_description: params.game_description,
+          image_data: dataUrl,
+        },
+        output: `Style image loaded: ${params.chosen_path} (${imgData.length} bytes)\n\nGame: ${params.game_description}\n\nPlease analyze this image to extract:\n1. Color palette (provide HEX values for main colors)\n2. Art style description (line weight, shading, pixel density, etc.)\n3. Lighting and shadow rules\n4. Character/object proportions\n\nThen:\n- Write docs/visual_bible.md with these visual rules\n- Call godot_style_set with reference_asset="${params.chosen_path}" and art_direction="[your style description]"\n\nImage data is available in the metadata.image_data field for vision analysis.`,
+      }
+    } catch (err: any) {
+      return {
+        title: "Art confirm failed",
+        metadata: { error: err.message },
+        output: `Error: Could not read image at ${params.chosen_path}: ${err.message}`,
+      }
+    }
+  },
+})
+
+// =============================================================================
+// godot_style_set - Lock in the project art style profile
+// =============================================================================
+
+const STYLE_SET_DESCRIPTION = `Save the project's art style profile to .ai_style_profile.json.
+
+Call this after analyzing the chosen style image (godot_art_confirm). Provide:
+- reference_asset: the chosen exploration image (or cornerstone hero after generation)
+- art_direction: concise style description that will be prepended to ALL future asset prompts
+- palette: HEX color values extracted from the reference image
+
+After calling this, godot_asset_generate will automatically apply this style to all new assets.`
+
+export const GodotStyleSetTool = Tool.define("godot_style_set", {
+  description: STYLE_SET_DESCRIPTION,
+  parameters: z.object({
+    reference_asset: z.string().describe("res:// path to the reference/anchor image for consistency"),
+    art_direction: z.string().describe("Concise style description prepended to all prompts, e.g. '16-bit pixel art, dark fantasy palette, 1px black outlines, no anti-aliasing'"),
+    palette: z.array(z.string()).optional().describe("HEX color values, e.g. ['#1a1a2e', '#e94560']"),
+    consistency_model: z.string().optional().describe("Model for consistency generation (default: flux-kontext-pro)"),
+    consistency_strength: z.number().optional().describe("Reference influence strength 0.0-1.0 (default: 0.7)"),
+  }),
+  async execute(params, ctx) {
+    const projectRoot = Instance.directory
+    const profile: StyleProfile = {
+      reference_asset: params.reference_asset,
+      art_direction: params.art_direction,
+      consistency_model: params.consistency_model ?? "flux-kontext-pro",
+      consistency_strength: params.consistency_strength ?? 0.7,
+      palette: params.palette ?? [],
+      created_at: new Date().toISOString(),
+    }
+
+    await writeProfile(projectRoot, profile)
+
+    return {
+      title: "Art style profile saved",
+      metadata: { profile },
+      output: `Style profile saved to .ai_style_profile.json\n\nStyle: ${params.art_direction}\nReference: ${params.reference_asset}\nModel: ${profile.consistency_model} (strength: ${profile.consistency_strength})\nPalette: ${profile.palette.join(", ") || "(none)"}\n\nAll future godot_asset_generate calls will automatically use this style.`,
+    }
+  },
+})
+
+// =============================================================================
+// godot_asset_review - AI visual review: compare generated asset to reference
+// =============================================================================
+
+const ASSET_REVIEW_DESCRIPTION = `Review a generated asset for style consistency against a reference image.
+
+Returns structured scores and recommendations. Use after generating each cornerstone asset or when the user wants quality verification.
+
+Reads both images and returns base64 data for your vision analysis. You should evaluate:
+- Style consistency (does it match the reference art style?)
+- Visual clarity (is the asset readable at game resolution?)
+- Visual Bible compliance (does it follow the established rules?)
+
+Then present findings to the user and ask: Pass / Regenerate / Adjust prompt.`
+
+export const GodotAssetReviewTool = Tool.define("godot_asset_review", {
+  description: ASSET_REVIEW_DESCRIPTION,
+  parameters: z.object({
+    asset_path: z.string().describe("res:// path to the asset to review"),
+    reference_path: z.string().describe("res:// path to the reference image (exploration or cornerstone hero)"),
+    asset_role: z.string().describe("What this asset represents, e.g. 'hero character', 'ground tile', 'UI panel'"),
+  }),
+  async execute(params, ctx) {
+    const projectRoot = Instance.directory
+
+    const toAbs = (p: string) => p.startsWith("res://") ? path.join(projectRoot, p.slice(6)) : p
+
+    let assetData: string | null = null
+    let refData: string | null = null
+
+    try {
+      const assetBuf = await fs.readFile(toAbs(params.asset_path))
+      assetData = `data:image/png;base64,${assetBuf.toString("base64")}`
+    } catch (err: any) {
+      return {
+        title: "Review failed",
+        metadata: { error: "asset_not_found" },
+        output: `Error: Cannot read asset at ${params.asset_path}: ${err.message}`,
+      }
+    }
+
+    try {
+      const refBuf = await fs.readFile(toAbs(params.reference_path))
+      refData = `data:image/png;base64,${refBuf.toString("base64")}`
+    } catch {
+      refData = null
+    }
+
+    return {
+      title: `Ready to review: ${path.basename(toAbs(params.asset_path))}`,
+      metadata: {
+        asset_path: params.asset_path,
+        reference_path: params.reference_path,
+        asset_role: params.asset_role,
+        asset_image: assetData,
+        reference_image: refData,
+      },
+      output: `Asset review requested for: ${params.asset_path}\nRole: ${params.asset_role}\nReference: ${params.reference_path}\n\nPlease compare the two images (available in metadata.asset_image and metadata.reference_image) and provide:\n\n**Style Consistency**: X/5 — [explanation]\n**Visual Clarity**: X/5 — [explanation]\n**Visual Bible Compliance**: X/5 — [explanation]\n**Overall**: Pass / Needs Revision\n**Suggestions**: [if any]\n\nThen ask the user:\n- ✅ Pass — continue to next asset\n- 🔄 Regenerate with same prompt\n- ✏️ Adjust prompt (ask user for changes)`,
+    }
+  },
+})
+
+// =============================================================================
+// godot_cornerstone_generate - Generate baseline asset suite sequentially
+// =============================================================================
+
+const CORNERSTONE_DESCRIPTION = `Generate the project's cornerstone asset suite: a set of baseline assets that establish the visual foundation.
+
+CRITICAL ORDER:
+1. Hero/main character FIRST (text-to-image, no reference needed)
+2. After hero is approved: update style_profile.reference_asset to hero path
+3. All subsequent assets use FLUX Kontext with hero as reference → style consistency
+
+For each asset: generate → review → user approves or re-generates.
+All approved assets saved to res://assets/cornerstone/`
+
+export const GodotCornerstoneGenerateTool = Tool.define("godot_cornerstone_generate", {
+  description: CORNERSTONE_DESCRIPTION,
+  parameters: z.object({
+    subjects: z.array(z.string()).describe("Asset subjects in order. First should be the hero/main character. E.g. ['hero character idle', 'main enemy', 'ground tile', 'UI panel frame', 'item icon']"),
+    art_direction: z.string().optional().describe("Style description override (reads from .ai_style_profile.json if not provided)"),
+  }),
+  async execute(params, ctx) {
+    const projectRoot = Instance.directory
+    const profile = readProfile(projectRoot)
+    const artDirection = params.art_direction ?? profile?.art_direction ?? ""
+
+    if (!artDirection) {
+      return {
+        title: "Cornerstone generation failed",
+        metadata: { error: "no_art_direction" },
+        output: "Error: No art direction found. Please run godot_art_explore → godot_art_confirm → godot_style_set first, or provide art_direction parameter.",
+      }
+    }
+
+    const cornerstoneDir = path.join(projectRoot, "assets", "cornerstone")
+    await fs.mkdir(cornerstoneDir, { recursive: true })
+
+    const plan = params.subjects.map((subject, i) => {
+      const slug = subject.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")
+      return {
+        index: i,
+        subject,
+        slug,
+        resPath: `res://assets/cornerstone/${slug}.png`,
+        absPath: path.join(cornerstoneDir, `${slug}.png`),
+        isHero: i === 0,
+      }
+    })
+
+    const planText = plan.map((p) =>
+      `  ${p.index + 1}. ${p.subject} → ${p.resPath}${p.isHero ? " [HERO — generated first, then becomes reference]" : " [uses hero as style reference]"}`
+    ).join("\n")
+
+    return {
+      title: `Cornerstone plan: ${plan.length} assets`,
+      metadata: {
+        plan,
+        art_direction: artDirection,
+        cornerstone_dir: `res://assets/cornerstone/`,
+      },
+      output: `Cornerstone generation plan (${plan.length} assets):\n${planText}\n\nWorkflow:\n1. Generate hero (${plan[0].subject}) with text2img only\n2. Call godot_asset_review to check it\n3. On approval: call godot_style_set to update reference_asset to hero path\n4. Generate each subsequent asset with FLUX Kontext (hero as reference)\n5. Review and approve each before proceeding\n\nTo start: call godot_asset_generate with:\n  type: "texture"\n  prompt: "${artDirection}. ${plan[0].subject}, game asset, transparent background"\n  destination: "${plan[0].resPath}"\n  use_project_style: false\n  model: "flux-schnell"\n\nAfter approval, update reference and continue with remaining assets using model: "flux-kontext-pro"`,
+    }
+  },
+})
+
+// =============================================================================
+// godot_batch_generate - Batch generate assets with style consistency
+// =============================================================================
+
+const BATCH_GENERATE_DESCRIPTION = `Generate multiple assets in parallel, all with the same reference image for style consistency.
+
+Uses FLUX Kontext to maintain visual coherence across a batch. Max 3 concurrent generations.
+Reads the project style profile automatically unless overridden.`
+
+export const GodotBatchGenerateTool = Tool.define("godot_batch_generate", {
+  description: BATCH_GENERATE_DESCRIPTION,
+  parameters: z.object({
+    prompts: z.array(z.string()).describe("Asset descriptions, one per asset"),
+    output_dir: z.string().describe("res:// directory to save all generated assets"),
+    reference_asset: z.string().optional().describe("res:// path to override the project style reference image"),
+    asset_type: z.string().optional().describe("Asset type for all assets (default: texture)"),
+    model: z.string().optional().describe("Override model (default: flux-kontext-pro if reference available)"),
+  }),
+  async execute(params, ctx) {
+    const projectRoot = Instance.directory
+    const profile = readProfile(projectRoot)
+
+    const refAsset = params.reference_asset ?? profile?.reference_asset
+    const artDirection = profile?.art_direction ?? ""
+    const modelId = params.model ?? (refAsset ? "flux-kontext-pro" : "flux-2-dev")
+    const assetType = (params.asset_type ?? "texture") as AssetProvider.AssetType
+
+    const resolved = await AssetProviderRegistry.resolveModel(assetType, modelId)
+    if (!resolved) {
+      return {
+        title: "Batch generation failed",
+        metadata: { error: "no_provider" },
+        output: "Error: No provider configured for the requested model/type.",
+      }
+    }
+
+    const destDir = params.output_dir.startsWith("res://")
+      ? path.join(projectRoot, params.output_dir.slice(6))
+      : params.output_dir
+    await fs.mkdir(destDir, { recursive: true })
+
+    ctx.metadata({ title: `Batch generating ${params.prompts.length} assets...` })
+
+    const CONCURRENCY = 3
+    const results: Array<{ prompt: string; resPath: string; status: string }> = []
+
+    // Process in chunks of CONCURRENCY
+    for (let i = 0; i < params.prompts.length; i += CONCURRENCY) {
+      const chunk = params.prompts.slice(i, i + CONCURRENCY)
+
+      const chunkResults = await Promise.all(
+        chunk.map(async (prompt, j) => {
+          const idx = i + j
+          const slug = `batch_${String(idx + 1).padStart(3, "0")}`
+          const filename = `${slug}.png`
+          const destPath = path.join(destDir, filename)
+          const resPath = `${params.output_dir.replace(/\/$/, "")}/${filename}`
+
+          const fullPrompt = artDirection ? `${artDirection}. ${prompt}` : prompt
+          const genParams: Record<string, unknown> = {}
+          if (refAsset) genParams.input_image = refAsset
+
+          try {
+            const result = await resolved.provider.generate({
+              type: assetType,
+              prompt: fullPrompt,
+              model: resolved.modelId,
+              parameters: genParams,
+            })
+
+            let status = result
+            while (status.status === "pending" || status.status === "processing") {
+              await new Promise((resolve) => setTimeout(resolve, 2000))
+              status = await resolved.provider.checkStatus(result.generationId)
+              if (ctx.abort.aborted) break
+            }
+
+            if (status.status === "completed") {
+              const bundle = await resolved.provider.download(result.generationId)
+              if (bundle.assets.length > 0) {
+                await fs.writeFile(destPath, bundle.assets[0].data)
+
+                const metadata: AssetProvider.AssetMetadata = {
+                  origin: "generated",
+                  asset_type: assetType,
+                  prompt: fullPrompt,
+                  provider: resolved.provider.id,
+                  model: resolved.modelId,
+                  generation_id: result.generationId,
+                  parameters: genParams,
+                  created_at: new Date().toISOString(),
+                  version: 1,
+                }
+                await AssetMetadata.write(destPath, metadata)
+
+                return { prompt, resPath, status: "ready" }
+              }
+            }
+            return { prompt, resPath, status: "failed" }
+          } catch (err: any) {
+            return { prompt, resPath, status: `error: ${err.message}` }
+          }
+        })
+      )
+
+      results.push(...chunkResults)
+    }
+
+    const readyCount = results.filter((r) => r.status === "ready").length
+    const lines = results.map((r, i) => `  ${i + 1}. ${r.prompt.slice(0, 50)} → ${r.resPath} [${r.status}]`).join("\n")
+
+    return {
+      title: `Batch generated ${readyCount}/${params.prompts.length} assets`,
+      metadata: { results, output_dir: params.output_dir, reference_asset: refAsset },
+      output: `Batch generation complete: ${readyCount}/${params.prompts.length} succeeded\nModel: ${resolved.modelId}${refAsset ? ` (reference: ${refAsset})` : ""}\n\n${lines}`,
     }
   },
 })

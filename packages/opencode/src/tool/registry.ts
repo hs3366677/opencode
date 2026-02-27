@@ -37,6 +37,13 @@ import {
   GodotAssetTransformTool,
   GodotAssetRefinePromptTool,
   GodotAssetListModelsTool,
+  GodotWorldbuildingTool,
+  GodotArtExploreTool,
+  GodotArtConfirmTool,
+  GodotStyleSetTool,
+  GodotAssetReviewTool,
+  GodotCornerstoneGenerateTool,
+  GodotBatchGenerateTool,
 } from "./godot-ai-asset"
 
 export namespace ToolRegistry {
@@ -138,6 +145,14 @@ export namespace ToolRegistry {
       GodotAssetTransformTool,
       GodotAssetRefinePromptTool,
       GodotAssetListModelsTool,
+      // Godot Art Director tools
+      GodotWorldbuildingTool,
+      GodotArtExploreTool,
+      GodotArtConfirmTool,
+      GodotStyleSetTool,
+      GodotAssetReviewTool,
+      GodotCornerstoneGenerateTool,
+      GodotBatchGenerateTool,
       GodotEditorCommandTool,
       GodotScreenshotTool,
       ...custom,
