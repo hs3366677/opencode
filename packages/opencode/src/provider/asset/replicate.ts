@@ -4,6 +4,7 @@ import path from "path"
 import { Log } from "../../util/log"
 import { AssetProvider } from "./asset-provider"
 import { Instance } from "../../project/instance"
+import { getModelDefaults } from "../../config/model-defaults"
 
 /**
  * Replicate provider for 2D image/texture generation.
@@ -34,19 +35,16 @@ export class ReplicateProvider implements AssetProvider.Provider {
   private bundleCache = new Map<string, AssetProvider.AssetBundle>()
 
   /** Models that use aspect_ratio instead of width/height */
-  private static readonly ASPECT_RATIO_MODELS = new Set(["sd-3.5-medium", "sd-3.5-large-turbo", "flux-schnell", "flux-kontext-pro", "flux-kontext-max", "flux-2-dev", "flux-2-pro"])
+  private static readonly ASPECT_RATIO_MODELS = new Set(["sd-3.5-medium", "sd-3.5-large-turbo", "flux-2-pro", "nano-banana-2"])
 
   /** Models that use cfg instead of guidance_scale */
   private static readonly CFG_MODELS = new Set(["sd-3.5-medium", "sd-3.5-large-turbo"])
 
   /** Models that do NOT support negative_prompt */
-  private static readonly NO_NEGATIVE_PROMPT = new Set(["flux-schnell", "flux-kontext-pro", "flux-kontext-max", "flux-2-dev", "flux-2-pro"])
-
-  /** Models that support img2img via input_image parameter */
-  private static readonly KONTEXT_MODELS = new Set(["flux-kontext-pro", "flux-kontext-max"])
+  private static readonly NO_NEGATIVE_PROMPT = new Set(["flux-2-pro", "nano-banana-2"])
 
   /** FLUX.2 models — use output_quality parameter, quality auto (no go_fast) */
-  private static readonly FLUX2_MODELS = new Set(["flux-2-dev", "flux-2-pro"])
+  private static readonly FLUX2_MODELS = new Set(["flux-2-pro"])
 
   /** Model identifier → Replicate model string mapping */
   private static readonly MODELS: Record<string, {
@@ -54,30 +52,15 @@ export class ReplicateProvider implements AssetProvider.Provider {
     description: string;
     cost: number;
   }> = {
-    "flux-2-dev": {
-      ref: "black-forest-labs/flux-2-dev",
-      description: "FLUX.2 [dev] — open-source, high quality, output_quality auto",
-      cost: 0.012,
-    },
     "flux-2-pro": {
       ref: "black-forest-labs/flux-2-pro",
       description: "FLUX.2 [pro] — flagship quality, 6s generation, output_quality auto",
       cost: 0.015,
     },
-    "flux-schnell": {
-      ref: "black-forest-labs/flux-schnell",
-      description: "FLUX.1 Schnell — fastest text-to-image",
-      cost: 0.003,
-    },
-    "flux-kontext-pro": {
-      ref: "black-forest-labs/flux-kontext-pro",
-      description: "FLUX.1 Kontext [pro] — style consistency via reference image",
-      cost: 0.04,
-    },
-    "flux-kontext-max": {
-      ref: "black-forest-labs/flux-kontext-max",
-      description: "FLUX.1 Kontext [max] — highest quality style consistency",
-      cost: 0.06,
+    "nano-banana-2": {
+      ref: "google/nano-banana-2",
+      description: "Nano Banana 2 (Gemini 3.1 Flash Image) — fast, pro-level quality, text rendering, image editing",
+      cost: 0.067,
     },
     "sd-3.5-medium": {
       ref: "stability-ai/stable-diffusion-3.5-medium",
@@ -161,18 +144,18 @@ export class ReplicateProvider implements AssetProvider.Provider {
   }
 
   async generate(request: AssetProvider.GenerationRequest): Promise<AssetProvider.GenerationResult> {
-    const modelId = request.model ?? "flux-2-dev"
+    const modelId = request.model ?? getModelDefaults().image_generation
     const modelEntry = ReplicateProvider.MODELS[modelId]
 
     if (!modelEntry) {
       throw new Error(`Unknown Replicate model: ${modelId}. Available: ${Object.keys(ReplicateProvider.MODELS).join(", ")}`)
     }
 
-    // For FLUX Kontext models: load reference image and prepend consistency prefix
+    // For FLUX.2 Pro: load reference image if provided (supports up to 8 input images)
     let effectivePrompt = request.prompt
     let inputImageDataUrl: string | undefined
 
-    if (ReplicateProvider.KONTEXT_MODELS.has(modelId) && request.parameters.input_image) {
+    if (ReplicateProvider.FLUX2_MODELS.has(modelId) && request.parameters.input_image) {
       const inputImagePath = String(request.parameters.input_image)
       let absPath = inputImagePath
       if (inputImagePath.startsWith("res://")) {
@@ -183,10 +166,10 @@ export class ReplicateProvider implements AssetProvider.Provider {
         const ext = path.extname(absPath).toLowerCase()
         const mimeType = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png"
         inputImageDataUrl = `data:${mimeType};base64,${imgData.toString("base64")}`
-        effectivePrompt = `Maintain the exact same art style, color palette, and visual quality as the reference. ${request.prompt}`
-        this.log.info("kontext img2img: loaded reference image", { path: absPath, size: imgData.length })
+        effectivePrompt = `Maintain the exact same art style, color palette, and visual quality as the reference image. ${request.prompt}`
+        this.log.info("flux-2-pro img2img: loaded reference image", { path: absPath, size: imgData.length })
       } catch (err: any) {
-        this.log.warn("kontext img2img: failed to load reference image", { path: absPath, error: err.message })
+        this.log.warn("flux-2-pro img2img: failed to load reference image, falling back to text-only", { path: absPath, error: err.message })
       }
     }
 
@@ -194,28 +177,36 @@ export class ReplicateProvider implements AssetProvider.Provider {
       prompt: effectivePrompt,
     }
 
-    // Set input_image after input object is created
     if (inputImageDataUrl) {
       input.input_image = inputImageDataUrl
     }
 
-    if (request.negativePrompt && !ReplicateProvider.NO_NEGATIVE_PROMPT.has(modelId)) {
-      input.negative_prompt = request.negativePrompt
+    if (request.negativePrompt) {
+      if (ReplicateProvider.NO_NEGATIVE_PROMPT.has(modelId)) {
+        // Append negative prompt to positive prompt for models without native support
+        input.prompt = `${input.prompt}. Avoid: ${request.negativePrompt}`
+      } else {
+        input.negative_prompt = request.negativePrompt
+      }
     }
     if (request.parameters.seed) input.seed = request.parameters.seed
     if (request.parameters.num_outputs) input.num_outputs = request.parameters.num_outputs
 
     if (ReplicateProvider.ASPECT_RATIO_MODELS.has(modelId)) {
-      // Aspect-ratio models: convert width/height to closest ratio
-      const w = (request.parameters.width as number) || 768
-      const h = (request.parameters.height as number) || 768
-      input.aspect_ratio = ReplicateProvider.findClosestAspectRatio(w, h, modelId)
+      // Aspect-ratio models: use explicit aspect_ratio string if provided, else compute from width/height
+      if (typeof request.parameters.aspect_ratio === "string" && request.parameters.aspect_ratio) {
+        input.aspect_ratio = request.parameters.aspect_ratio
+      } else {
+        const w = (request.parameters.width as number) || 768
+        const h = (request.parameters.height as number) || 768
+        input.aspect_ratio = ReplicateProvider.findClosestAspectRatio(w, h, modelId)
 
-      // Parse target size from metadata (e.g., "32x44") for aspect ratio
-      if (request.parameters.size) {
-        const match = String(request.parameters.size).match(/^(\d+)x(\d+)$/)
-        if (match) {
-          input.aspect_ratio = ReplicateProvider.findClosestAspectRatio(parseInt(match[1]), parseInt(match[2]), modelId)
+        // Parse target size from metadata (e.g., "32x44") for aspect ratio
+        if (request.parameters.size) {
+          const match = String(request.parameters.size).match(/^(\d+)x(\d+)$/)
+          if (match) {
+            input.aspect_ratio = ReplicateProvider.findClosestAspectRatio(parseInt(match[1]), parseInt(match[2]), modelId)
+          }
         }
       }
 
@@ -226,20 +217,9 @@ export class ReplicateProvider implements AssetProvider.Provider {
         input.cfg = request.parameters.guidance_scale ?? (modelId === "sd-3.5-large-turbo" ? 1 : 5)
       }
 
-      // flux-schnell: num_inference_steps capped at 4
-      if (modelId === "flux-schnell") {
-        input.num_inference_steps = Math.min(request.parameters.num_inference_steps ?? 4, 4)
-      }
-
-      // flux-kontext: output_format png
-      if (ReplicateProvider.KONTEXT_MODELS.has(modelId)) {
-        input.output_format = "png"
-      }
-
       // FLUX.2: output_quality auto (omit to let model decide, or pass 80 as default)
       if (ReplicateProvider.FLUX2_MODELS.has(modelId)) {
         input.output_format = "png"
-        // Do not set output_quality — let the model use its default (auto)
       }
     } else {
       // SDXL and other width/height models
@@ -395,7 +375,7 @@ export class ReplicateProvider implements AssetProvider.Provider {
 
     const generationId = `rep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     this.resultCache.set(generationId, { status: "processing" })
-    this.runPrediction(generationId, ReplicateProvider.MODELS["sdxl"].ref, input)
+    this.runPrediction(generationId, ReplicateProvider.MODELS[getModelDefaults().image_transform].ref, input)
 
     return {
       generationId,
@@ -435,7 +415,7 @@ export class ReplicateProvider implements AssetProvider.Provider {
     ["4:5", 4/5], ["5:4", 5/4], ["9:16", 9/16], ["9:21", 9/21],
   ]
 
-  /** Flux-schnell accepted aspect ratios (superset with 3:4, 4:3) */
+  /** FLUX.2 accepted aspect ratios (superset with 3:4, 4:3) */
   private static readonly FLUX_RATIOS: [string, number][] = [
     ["1:1", 1], ["16:9", 16/9], ["21:9", 21/9], ["3:2", 3/2], ["2:3", 2/3],
     ["4:5", 4/5], ["5:4", 5/4], ["3:4", 3/4], ["4:3", 4/3], ["9:16", 9/16], ["9:21", 9/21],
@@ -443,7 +423,7 @@ export class ReplicateProvider implements AssetProvider.Provider {
 
   /** Pick the closest valid aspect ratio from width/height for a given model */
   private static findClosestAspectRatio(w: number, h: number, modelId: string): string {
-    const ratios = (modelId === "flux-schnell" || ReplicateProvider.KONTEXT_MODELS.has(modelId) || ReplicateProvider.FLUX2_MODELS.has(modelId))
+    const ratios = (ReplicateProvider.FLUX2_MODELS.has(modelId) || modelId === "nano-banana-2")
       ? ReplicateProvider.FLUX_RATIOS
       : ReplicateProvider.SD35_RATIOS
     const target = w / h

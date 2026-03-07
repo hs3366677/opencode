@@ -4,9 +4,10 @@ import fs from "fs/promises"
 import path from "path"
 import { Instance } from "../../project/instance"
 import { readProfile, writeProfile } from "../../provider/asset/style-profile"
-import { AssetProviderRegistry } from "../../provider/asset"
+import { getModelDefaults } from "../../config/model-defaults"
 import { AssetMetadata } from "../../provider/asset/metadata"
 import type { AssetProvider } from "../../provider/asset/asset-provider"
+import { generateImage } from "../../provider/asset/generate-image"
 
 const log = Log.create({ service: "godot.commands" })
 
@@ -42,6 +43,33 @@ export namespace GodotScreenshots {
   /** Poll for a screenshot result. Returns null if not ready yet. */
   export function get(id: string): string | null {
     return screenshotResults.get(id)?.data ?? null
+  }
+}
+
+// ── In-memory eval result store ──────────────────────────────────────────────
+// Eval results are posted by Godot editor and consumed by the godot_eval tool.
+
+interface EvalResult {
+  value: string
+  error?: string
+  timestamp: number
+}
+
+const evalResults = new Map<string, EvalResult>()
+
+export namespace GodotEvalResults {
+  /** Store an eval result from Godot editor. */
+  export function store(id: string, value: string, error?: string) {
+    evalResults.set(id, { value, error, timestamp: Date.now() })
+    // Auto-cleanup after 30 seconds
+    setTimeout(() => evalResults.delete(id), 30_000)
+  }
+
+  /** Poll for an eval result. Returns null if not ready yet. */
+  export function get(id: string): { value: string; error?: string } | null {
+    const result = evalResults.get(id)
+    if (!result) return null
+    return { value: result.value, error: result.error }
   }
 }
 
@@ -122,6 +150,27 @@ export function GodotRoutes() {
       return c.json({ ready: true, data })
     })
 
+    // Godot editor POSTs eval result here after expression evaluation
+    .post("/eval-result", async (c) => {
+      const { id, value, error } = await c.req.json<{ id: string; value: string; error?: string }>()
+      if (!id) {
+        return c.json({ error: "Missing id" }, 400)
+      }
+      GodotEvalResults.store(id, value ?? "", error)
+      log.info("eval result stored", { id, hasError: !!error })
+      return c.json({ success: true })
+    })
+
+    // Tool polls this endpoint to get an eval result by ID
+    .get("/eval/:id", async (c) => {
+      const id = c.req.param("id")
+      const result = GodotEvalResults.get(id)
+      if (!result) {
+        return c.json({ ready: false })
+      }
+      return c.json({ ready: true, ...result })
+    })
+
     // ── Art Director routes ──────────────────────────────────────────────────
 
     // GET current style profile
@@ -159,14 +208,51 @@ export function GodotRoutes() {
 
       const scanDir = async (category: string, absDir: string, resBase: string) => {
         try {
-          const entries = await fs.readdir(absDir)
+          const entries = await fs.readdir(absDir, { withFileTypes: true })
           for (const entry of entries) {
-            if (/\.(png|jpg|jpeg|webp)$/i.test(entry)) {
-              images.push({
+            // Skip directories (including .ai.* metadata dirs) and hidden files
+            if (entry.isDirectory()) continue
+            if (entry.name.startsWith(".")) continue
+            if (/\.(png|jpg|jpeg|webp)$/i.test(entry.name)) {
+              const absPath = path.join(absDir, entry.name)
+              const img: Record<string, string> = {
                 category,
-                resPath: `${resBase}/${entry}`,
-                absPath: path.join(absDir, entry),
-              })
+                resPath: `${resBase}/${entry.name}`,
+                absPath,
+              }
+              // For cornerstone assets, read metadata to get subject description
+              if (category === "cornerstone") {
+                try {
+                  const metaDir = path.join(absDir, `.ai.${entry.name}`)
+                  const metaContent = await fs.readFile(path.join(metaDir, "metadata.json"), "utf-8")
+                  const meta = JSON.parse(metaContent)
+                  if (meta.prompt) {
+                    // Prompt format: "{art_direction}. {subject description}"
+                    // Art direction often ends with period, producing ".." before subject.
+                    const doubleDot = meta.prompt.indexOf(".. ")
+                    let subject: string
+                    if (doubleDot >= 0) {
+                      subject = meta.prompt.slice(doubleDot + 3)
+                    } else {
+                      const sentences = meta.prompt.split(". ")
+                      subject = sentences.length > 1 ? sentences[sentences.length - 1] : meta.prompt
+                    }
+                    // Full first sentence → tooltip
+                    const firstSentence = subject.split(/\.\s/)[0]
+                    img.tooltip = firstSentence
+
+                    // Short label: extract key noun phrase (strip filler words)
+                    const short = firstSentence
+                      .replace(/^(Single|A|An|The|One|Small|Large|Rectangular)\s+/i, "")
+                      .replace(/\s+(on|with|in|for|from|centered)\s+.*/i, "")
+                      .replace(/\s+(icon|design|asset|sprite|image|texture|symbol|element)\s*$/i, "")
+                    img.label = short.length > 24 ? short.slice(0, 22) + ".." : short
+                  }
+                } catch {
+                  // No metadata — fall back to filename
+                }
+              }
+              images.push(img)
             }
           }
         } catch {
@@ -271,18 +357,8 @@ async function runArtDirectorBatch(
 
   const refAsset = params.reference_asset ?? profile?.reference_asset
   const artDirection = profile?.art_direction ?? ""
-  const modelId = params.model ?? (refAsset ? "flux-kontext-pro" : "flux-2-dev")
+  const modelId = params.model ?? getModelDefaults().image_batch
   const assetType = (params.asset_type ?? "texture") as AssetProvider.AssetType
-
-  const resolved = await AssetProviderRegistry.resolveModel(assetType, modelId)
-  if (!resolved) {
-    for (const item of batch.items) {
-      item.status = "failed"
-      item.error = "No provider configured"
-    }
-    batch.failed = batch.total
-    return
-  }
 
   const destDir = params.output_dir.startsWith("res://")
     ? path.join(projectRoot, params.output_dir.slice(6))
@@ -308,50 +384,34 @@ async function runArtDirectorBatch(
         if (refAsset) genParams.input_image = refAsset
 
         try {
-          const result = await resolved.provider.generate({
+          const result = await generateImage({
             type: assetType,
             prompt: fullPrompt,
-            model: resolved.modelId,
+            model: modelId,
             parameters: genParams,
+            destPath,
           })
 
-          let status = result
-          let attempts = 0
-          while ((status.status === "pending" || status.status === "processing") && attempts < 120) {
-            await new Promise((resolve) => setTimeout(resolve, 2000))
-            status = await resolved.provider.checkStatus(result.generationId)
-            attempts++
-          }
-
-          if (status.status === "completed") {
-            const bundle = await resolved.provider.download(result.generationId)
-            if (bundle.assets.length > 0) {
-              await fs.writeFile(destPath, bundle.assets[0].data)
-
-              const metadata: AssetProvider.AssetMetadata = {
-                origin: "generated",
-                asset_type: assetType,
-                prompt: fullPrompt,
-                provider: resolved.provider.id,
-                model: resolved.modelId,
-                generation_id: result.generationId,
-                parameters: genParams,
-                created_at: new Date().toISOString(),
-                version: 1,
-              }
-              await AssetMetadata.write(destPath, metadata)
-
-              item.status = "completed"
-              item.resPath = resPath
-              batch.completed++
-            } else {
-              item.status = "failed"
-              item.error = "Empty output"
-              batch.failed++
+          if (result.success) {
+            const metadata: AssetProvider.AssetMetadata = {
+              origin: "generated",
+              asset_type: assetType,
+              prompt: fullPrompt,
+              provider: result.provider,
+              model: result.model,
+              generation_id: result.generationId,
+              parameters: genParams,
+              created_at: new Date().toISOString(),
+              version: 1,
             }
+            await AssetMetadata.write(destPath, metadata)
+
+            item.status = "completed"
+            item.resPath = resPath
+            batch.completed++
           } else {
             item.status = "failed"
-            item.error = `Generation ended with status: ${status.status}`
+            item.error = result.error ?? "Generation failed"
             batch.failed++
           }
         } catch (err: any) {

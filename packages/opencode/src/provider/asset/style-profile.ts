@@ -1,6 +1,7 @@
 import fs from "fs/promises"
 import { readFileSync } from "fs"
 import path from "path"
+import { getModelDefaults } from "../../config/model-defaults"
 
 export interface StyleProfile {
   /** res:// path to the reference asset (usually the cornerstone hero) */
@@ -31,6 +32,14 @@ export function readProfile(projectRoot: string): StyleProfile | null {
 
 /** Write (or overwrite) the project style profile. */
 export async function writeProfile(projectRoot: string, profile: StyleProfile): Promise<void> {
+  // Sanitize art_direction: must be technique-only, max ~200 chars.
+  // If the LLM wrote a full scene description, truncate to the first sentence.
+  if (profile.art_direction && profile.art_direction.length > 200) {
+    const firstSentence = profile.art_direction.split(". ")[0]
+    profile.art_direction = firstSentence.length > 200
+      ? firstSentence.slice(0, 200)
+      : firstSentence
+  }
   const profilePath = path.join(projectRoot, PROFILE_FILENAME)
   await fs.writeFile(profilePath, JSON.stringify(profile, null, 2), "utf8")
 }
@@ -38,7 +47,7 @@ export async function writeProfile(projectRoot: string, profile: StyleProfile): 
 /** Default values for a new StyleProfile */
 export function defaultProfile(): Partial<StyleProfile> {
   return {
-    consistency_model: "flux-kontext-pro",
+    consistency_model: getModelDefaults().style_consistency,
     consistency_strength: 0.7,
     palette: [],
     created_at: new Date().toISOString(),

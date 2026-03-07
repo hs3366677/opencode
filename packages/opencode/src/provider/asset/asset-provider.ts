@@ -179,11 +179,17 @@ export namespace AssetProvider {
     seed: z.number().optional(),
     parameters: z.record(z.string(), z.any()).optional(),
     category: PlaceholderCategory.optional(),
-    game_context: z
+    usage: z
       .object({
-        scene: z.string().optional(),
-        node_path: z.string().optional(),
-        purpose: z.string().optional(),
+        scene: z.string().optional().describe("Scene where the asset is used, e.g. res://scenes/battle.tscn"),
+        node_path: z.string().optional().describe("Node path in the scene, e.g. Player/Sprite2D"),
+        role: z.string().describe("What role this asset plays in the game, e.g. 'player idle sprite'"),
+        width: z.number().int().positive().optional().describe("Required width in pixels"),
+        height: z.number().int().positive().optional().describe("Required height in pixels"),
+        transparent_bg: z.boolean().default(true).describe("Whether the asset needs a transparent background"),
+        scale: z.string().optional().describe("Rendering scale: '1x', '2x', 'pixel-perfect'"),
+        tiling: z.enum(["none", "horizontal", "vertical", "both"]).default("none").describe("Tiling mode"),
+        animation_frames: z.number().int().optional().describe("Number of frames if sprite sheet"),
       })
       .optional(),
     created_at: z.string().optional(),
@@ -201,6 +207,15 @@ export namespace AssetProvider {
           seed: z.number().optional(),
           timestamp: z.string(),
           file: z.string().optional(),
+        }),
+      )
+      .optional(),
+    post_processing: z
+      .array(
+        z.object({
+          operation: z.string(),
+          params: z.record(z.string(), z.any()).optional(),
+          timestamp: z.string(),
         }),
       )
       .optional(),

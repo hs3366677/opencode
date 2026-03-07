@@ -1,5 +1,6 @@
 import { Log } from "../../util/log"
 import { AssetProvider } from "./asset-provider"
+import { getModelDefaults } from "../../config/model-defaults"
 
 /**
  * Doubao (ByteDance Seedream) provider for 2D image/texture generation.
@@ -96,7 +97,7 @@ export class DoubaoProvider implements AssetProvider.Provider {
   }
 
   async generate(request: AssetProvider.GenerationRequest): Promise<AssetProvider.GenerationResult> {
-    const model = request.model ?? "seedream-4"
+    const model = request.model ?? getModelDefaults().image_doubao
 
     const body: Record<string, unknown> = {
       model,
@@ -205,7 +206,7 @@ export class DoubaoProvider implements AssetProvider.Provider {
 
     let endpoint: string
     const body: Record<string, unknown> = {
-      model: request.model ?? "seedream-4",
+      model: request.model ?? getModelDefaults().image_doubao,
       image: imageBase64,
     }
 

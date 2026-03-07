@@ -3,6 +3,7 @@ import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { generateText } from "ai"
 import { lazy } from "../../util/lazy"
+import { Log } from "../../util/log"
 import { AssetProviderRegistry } from "../../provider/asset"
 import { AssetProvider } from "../../provider/asset/asset-provider"
 import { AssetMetadata } from "../../provider/asset/metadata"
@@ -10,6 +11,8 @@ import { Provider } from "../../provider/provider"
 import { Instance } from "../../project/instance"
 import path from "path"
 import fs from "fs/promises"
+
+const log = Log.create({ service: "ai-assets" })
 
 export const AIAssetRoutes = lazy(() =>
   new Hono()
@@ -207,6 +210,7 @@ export const AIAssetRoutes = lazy(() =>
       ),
       async (c) => {
         const body = c.req.valid("json" as never) as AssetProvider.GenerationRequest
+        log.info("[generate] request", { type: body.type, requestedModel: body.model, prompt: body.prompt?.slice(0, 80) })
         let resolved
         try {
           resolved = await AssetProviderRegistry.resolveModel(body.type, body.model)
@@ -214,6 +218,7 @@ export const AIAssetRoutes = lazy(() =>
           return c.json({ error: e.message }, 400)
         }
         const { provider, modelId } = resolved
+        log.info("[generate] resolved", { provider: provider.id, modelId, requestedModel: body.model })
         let result
         try {
           result = await provider.generate({ ...body, model: modelId })
@@ -560,6 +565,22 @@ export const AIAssetRoutes = lazy(() =>
       const { version } = await c.req.json<{ version: number }>()
       await AssetMetadata.deleteVersion(assetPath, version)
       return c.json({ success: true, version })
+    })
+
+    // Delete metadata for a specific asset
+    .delete("/metadata/*", async (c) => {
+      const resPath = decodeURIComponent(c.req.path.replace(/^.*\/metadata\//, ""))
+      const assetPath = resolveAssetPath(resPath)
+      await AssetMetadata.remove(assetPath)
+      return c.json({ success: true, path: resPath })
+    })
+
+    // Clean orphaned metadata (whose source asset was deleted)
+    .post("/metadata/clean", async (c) => {
+      const projectRoot = Instance.directory
+      const assetsDir = path.join(projectRoot, "assets")
+      const cleaned = await AssetMetadata.cleanOrphaned(assetsDir)
+      return c.json({ cleaned, count: cleaned.length })
     }),
 )
 
