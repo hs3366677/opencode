@@ -40,6 +40,7 @@ import { QuestionRoutes } from "./routes/question"
 import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
 import { AIAssetRoutes } from "./routes/ai-assets"
+import { GodotRoutes } from "./routes/godot"
 import { AssetProviderRegistry } from "../provider/asset"
 import { MDNS } from "./mdns"
 
@@ -164,6 +165,7 @@ export namespace Server {
         .route("/", FileRoutes())
         .route("/mcp", McpRoutes())
         .route("/ai-assets", AIAssetRoutes())
+        .route("/godot", GodotRoutes())
         .route("/tui", TuiRoutes())
         .post(
           "/instance/dispose",

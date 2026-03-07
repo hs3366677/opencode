@@ -1,5 +1,6 @@
 import { Log } from "../../util/log"
 import { AssetProvider } from "./asset-provider"
+import { getModelDefaults } from "../../config/model-defaults"
 
 /**
  * Meshy AI provider for 3D model generation.
@@ -96,7 +97,7 @@ export class MeshyProvider implements AssetProvider.Provider {
   }
 
   async generate(request: AssetProvider.GenerationRequest): Promise<AssetProvider.GenerationResult> {
-    const model = request.model ?? "meshy-6"
+    const model = request.model ?? getModelDefaults().model_3d
 
     // Stage 1: Create preview task (geometry)
     const previewBody: Record<string, unknown> = {
@@ -244,7 +245,7 @@ export class MeshyProvider implements AssetProvider.Provider {
 
     const body: Record<string, unknown> = {
       image: request.sourceFile.toString("base64"),
-      ai_model: request.model ?? "meshy-6",
+      ai_model: request.model ?? getModelDefaults().model_3d,
     }
     if (request.prompt) {
       body.prompt = request.prompt

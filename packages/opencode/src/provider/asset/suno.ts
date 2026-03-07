@@ -1,5 +1,6 @@
 import { Log } from "../../util/log"
 import { AssetProvider } from "./asset-provider"
+import { getModelDefaults } from "../../config/model-defaults"
 
 /**
  * Suno provider for AI music and sound effect generation.
@@ -95,7 +96,7 @@ export class SunoProvider implements AssetProvider.Provider {
   }
 
   async generate(request: AssetProvider.GenerationRequest): Promise<AssetProvider.GenerationResult> {
-    const model = request.model ?? (request.type === "audio_sfx" ? "suno-sfx" : "suno-v5")
+    const model = request.model ?? (request.type === "audio_sfx" ? getModelDefaults().audio_sfx : getModelDefaults().audio_music)
 
     const body: Record<string, unknown> = {
       model,

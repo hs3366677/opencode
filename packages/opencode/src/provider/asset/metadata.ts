@@ -70,6 +70,46 @@ export namespace AssetMetadata {
     }
   }
 
+  /**
+   * Scan a directory (recursively) and remove .ai.{filename}/ metadata dirs
+   * whose source asset file no longer exists.
+   * Returns the list of cleaned paths.
+   */
+  export async function cleanOrphaned(rootDir: string): Promise<string[]> {
+    const cleaned: string[] = []
+    await _cleanDir(rootDir, cleaned)
+    return cleaned
+  }
+
+  async function _cleanDir(dir: string, cleaned: string[]): Promise<void> {
+    let entries: import("fs").Dirent[]
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith(".ai.")) {
+          // .ai.{filename} → check if {filename} exists in same dir
+          const assetName = entry.name.slice(4) // strip ".ai."
+          const assetPath = path.join(dir, assetName)
+          try {
+            await fs.access(assetPath)
+          } catch {
+            // Asset gone — remove orphaned metadata
+            await fs.rm(fullPath, { recursive: true, force: true })
+            cleaned.push(assetPath)
+          }
+        } else {
+          // Recurse into non-metadata directories
+          await _cleanDir(fullPath, cleaned)
+        }
+      }
+    }
+  }
+
   // ── Version History (.ai.{filename}/ folder) ────────────────────────
 
   /** Get hidden version dir: dir/.ai.filename/ */

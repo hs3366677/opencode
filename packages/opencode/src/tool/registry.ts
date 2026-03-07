@@ -28,13 +28,24 @@ import { Truncate } from "./truncation"
 import { PlanExitTool, PlanEnterTool } from "./plan"
 import { ApplyPatchTool } from "./apply_patch"
 import { GodotAssetImportTool, GodotAssetImportBatchTool } from "./godot-asset-import"
+import { GodotEditorCommandTool } from "./godot-editor-command"
+import { GodotScreenshotTool } from "./godot-screenshot"
+import { GodotEvalTool } from "./godot-eval"
+import { GodotGameDesignTool, GodotCreationProgressTool } from "./godot-game-design"
+import { GodotAssetPostprocessTool, GodotAssetRemoveBgTool } from "./godot-asset-postprocess"
+import { GodotAssetPipelineTool } from "./godot-asset-pipeline"
+import { GodotAtlasSplitTool } from "./godot-atlas-split"
 import {
-  GodotAssetGenerateTool,
   GodotAssetCreatePlaceholderTool,
-  GodotAssetRegenerateTool,
   GodotAssetTransformTool,
   GodotAssetRefinePromptTool,
   GodotAssetListModelsTool,
+  GodotWorldbuildingTool,
+  GodotArtExploreTool,
+  GodotArtConfirmTool,
+  GodotStyleSetTool,
+  GodotAssetReviewTool,
+  GodotCornerstoneGenerateTool,
 } from "./godot-ai-asset"
 
 export namespace ToolRegistry {
@@ -130,12 +141,30 @@ export namespace ToolRegistry {
       // Godot AI Asset tools
       GodotAssetImportTool,
       GodotAssetImportBatchTool,
-      GodotAssetGenerateTool,
       GodotAssetCreatePlaceholderTool,
-      GodotAssetRegenerateTool,
       GodotAssetTransformTool,
       GodotAssetRefinePromptTool,
       GodotAssetListModelsTool,
+      // Godot Art Director tools
+      GodotWorldbuildingTool,
+      GodotArtExploreTool,
+      GodotArtConfirmTool,
+      GodotStyleSetTool,
+      GodotAssetReviewTool,
+      GodotCornerstoneGenerateTool,
+      GodotEditorCommandTool,
+      GodotScreenshotTool,
+      GodotEvalTool,
+      // Godot Asset Post-Processing tools
+      GodotAssetPostprocessTool,
+      GodotAssetRemoveBgTool,
+      // Godot Asset Pipeline (generate → postprocess → score)
+      GodotAssetPipelineTool,
+      // Godot Atlas Split (OpenCV-based element detection)
+      GodotAtlasSplitTool,
+      // Godot Game Creation tools
+      GodotGameDesignTool,
+      GodotCreationProgressTool,
       ...custom,
     ]
   }
@@ -155,6 +184,11 @@ export namespace ToolRegistry {
     const result = await Promise.all(
       tools
         .filter((t) => {
+          // Agent-scoped tools: only visible to specified agents
+          if (t.agents && t.agents.length > 0) {
+            if (!agent || !t.agents.includes(agent.name)) return false
+          }
+
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {
             return model.providerID === "opencode" || Flag.OPENCODE_ENABLE_EXA
