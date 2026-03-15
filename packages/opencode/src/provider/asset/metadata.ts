@@ -20,12 +20,24 @@ export namespace AssetMetadata {
     }
   }
 
-  /** Write metadata to version dir metadata.json */
+  /** Write metadata to version dir metadata.json (preserves version index fields) */
   export async function write(assetPath: string, metadata: AssetProvider.AssetMetadata): Promise<void> {
     const verDir = getVersionDir(assetPath)
     await fs.mkdir(verDir, { recursive: true })
     const verIndex = getVersionIndexPath(assetPath)
-    const content = JSON.stringify(metadata, null, 2)
+
+    // Preserve version index fields (history, current_version) from existing metadata
+    let existing: Record<string, any> = {}
+    try {
+      existing = JSON.parse(await fs.readFile(verIndex, "utf-8"))
+    } catch {
+      // No existing file
+    }
+    const merged: Record<string, any> = { ...metadata }
+    if (existing.history) merged.history = existing.history
+    if (existing.current_version != null) merged.current_version = existing.current_version
+
+    const content = JSON.stringify(merged, null, 2)
     await fs.writeFile(verIndex, content, "utf-8")
   }
 

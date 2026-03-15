@@ -10,6 +10,7 @@ import { readProfile, writeProfile } from "../provider/asset/style-profile"
 import type { StyleProfile } from "../provider/asset/style-profile"
 import { getModelDefaults } from "../config/model-defaults"
 import { generateImage } from "../provider/asset/generate-image"
+import { GodotAssetPipelineTool } from "./godot-asset-pipeline"
 
 // =============================================================================
 // godot_asset_generate - Low-level generation (not registered; use godot_asset_pipeline instead)
@@ -278,7 +279,7 @@ export const GodotAssetCreatePlaceholderTool = Tool.define("godot_asset_create_p
       prompt: params.prompt,
       negative_prompt: params.negative_prompt,
       provider: resolved?.provider.id ?? params.provider,
-      model: resolved?.modelId ?? params.model,
+      model: resolved?.modelId ?? params.model ?? getModelDefaults().image_generation,
       parameters: params.parameters,
       usage: params.usage,
       created_at: new Date().toISOString(),
@@ -761,6 +762,7 @@ export const GodotArtExploreTool = Tool.define("godot_art_explore", {
     aspect_ratio: z.string().default("16:9").describe("Image aspect ratio — choose based on game orientation. E.g. '16:9' for landscape, '9:16' for portrait/mobile"),
     model: z.string().optional().describe("Image generation model to use (default: nano-banana-2). Options: nano-banana-2, flux-2-pro, sd-3.5-medium, sd-3.5-large-turbo, sdxl"),
     worldbuilding_context: z.string().optional().describe("Condensed world visual prompt from godot_worldbuilding. If omitted, reads docs/worldbuilding.md"),
+    reference_image: z.string().optional().describe("res:// path to an existing image to use as image-to-image reference. Use when regenerating or refining a previously generated style exploration."),
   }),
   async execute(params, ctx) {
     const numStyles = params.num_styles ?? 4
@@ -814,8 +816,9 @@ export const GodotArtExploreTool = Tool.define("godot_art_explore", {
     ]
     const styleList = params.styles ?? defaultStyles.slice(0, numStyles)
 
-    // Ensure output directory exists
-    const explorationDir = path.join(projectRoot, "assets", ".art_exploration")
+    // Create a session subfolder with timestamp
+    const sessionId = `session_${new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+/, "").replace(/(\d{8})(\d{6})/, "$1_$2")}`
+    const explorationDir = path.join(projectRoot, "assets", ".art_exploration", sessionId)
     await fs.mkdir(explorationDir, { recursive: true })
 
     const results: Array<{ style: string; resPath: string; status: string }> = []
@@ -827,7 +830,7 @@ export const GodotArtExploreTool = Tool.define("godot_art_explore", {
       const prompt = buildExplorationPrompt(style, layout, params.game_description, worldContext)
       const filename = `style_${i + 1}.png`
       const destPath = path.join(explorationDir, filename)
-      const resPath = `res://assets/.art_exploration/${filename}`
+      const resPath = `res://assets/.art_exploration/${sessionId}/${filename}`
 
       ctx.metadata({ title: `Generating style ${i + 1}/${styleList.length}: ${style.split(" ").slice(0, 3).join(" ")}...` })
 
@@ -836,7 +839,10 @@ export const GodotArtExploreTool = Tool.define("godot_art_explore", {
           type: "texture",
           prompt,
           model: params.model ?? getModelDefaults().art_explore,
-          parameters: { aspect_ratio: params.aspect_ratio },
+          parameters: {
+            aspect_ratio: params.aspect_ratio,
+            ...(params.reference_image ? { input_image: params.reference_image } : {}),
+          },
           destPath,
           abortSignal: ctx.abort,
         })
@@ -861,6 +867,72 @@ export const GodotArtExploreTool = Tool.define("godot_art_explore", {
       title: `Generated ${readyCount}/${styleList.length} style explorations`,
       metadata: { explorations: results },
       output: `Generated ${readyCount} Key Art style explorations (${params.game_description}):\n${styleList2}\n\nEach image is a concept art scene showing the game's visual style (no UI elements — UI is generated separately in Cornerstone Assets).\nView and select your preferred style in the **Art Director** panel.\nTell me which style number you prefer (1-${styleList.length}).`,
+    }
+  },
+})
+
+// =============================================================================
+// godot_art_refine - Iterate on a single art exploration image (img2img)
+// =============================================================================
+
+const ART_REFINE_DESCRIPTION = `Refine a single art exploration image by regenerating it with a modified prompt, using the original as a reference.
+
+Use this after godot_art_explore when the user wants to iterate on a specific image — e.g. "remove the dragon", "add a castle in the background", "make it darker".
+The original image is sent as an img2img reference so the overall composition and style are preserved while applying the requested changes.
+
+Workflow: godot_art_explore → user picks a style → godot_art_refine (repeat until satisfied) → godot_art_confirm`
+
+export const GodotArtRefineTool = Tool.define("godot_art_refine", {
+  description: ART_REFINE_DESCRIPTION,
+  parameters: z.object({
+    reference_image: z.string().describe("res:// path to the image to refine — the refined result overwrites this file and a new version is saved in history"),
+    prompt: z.string().describe("Full prompt describing the desired result. Include the style and scene description, plus the modifications (e.g. 'same scene but remove the dragon and add a glowing portal')"),
+    strength: z.number().min(0).max(1).default(0.65).describe("How much to deviate from the reference. 0.0 = almost identical, 1.0 = ignore reference. Default 0.65. Use lower values (0.3-0.5) for small tweaks, higher (0.7-0.9) for major changes."),
+    model: z.string().optional().describe("Image generation model (default: nano-banana-2)"),
+    attempt: z.number().int().min(1).default(1),
+    max_retries: z.number().int().min(0).default(2),
+    previous_feedback: z.string().optional(),
+  }),
+  async execute(params, ctx) {
+    let refResPath = params.reference_image
+    if (!refResPath.startsWith("res://")) {
+      refResPath = "res://" + refResPath
+    }
+
+    ctx.metadata({ title: `Refining: ${path.basename(refResPath)}...` })
+
+    try {
+      const pipeline = await GodotAssetPipelineTool.init()
+      const result = await pipeline.execute({
+        prompt: params.prompt,
+        destination: refResPath,
+        asset_type: "texture",
+        requirements: { match_size: false, min_score: 7 },
+        model: params.model ?? getModelDefaults().art_explore,
+        reference_image: refResPath,
+        prompt_strength: params.strength,
+        use_project_style: true,
+        attempt: params.attempt,
+        max_retries: params.max_retries,
+        previous_feedback: params.previous_feedback,
+        usage: {
+          role: "art refinement",
+          transparent_bg: false,
+          tiling: "none" as const,
+        },
+      }, ctx)
+
+      return {
+        title: result.title ?? `Refined: ${path.basename(refResPath)}`,
+        metadata: { reference: refResPath, output: refResPath, error: "" },
+        output: `${result.output}\n\nView the result in the Art Director panel.\nIf you want to iterate further, call godot_art_refine again.\nWhen satisfied, call godot_art_confirm to lock in the style.`,
+      }
+    } catch (err: any) {
+      return {
+        title: "Refine failed",
+        metadata: { reference: params.reference_image, output: "", error: err.message },
+        output: `Error: ${err.message}`,
+      }
     }
   },
 })
@@ -1111,29 +1183,16 @@ export const GodotCornerstoneGenerateTool = Tool.define("godot_cornerstone_gener
     }
 
     const slug = params.filename
-    const cornerstoneDir = path.join(projectRoot, "assets", "cornerstone")
-    await fs.mkdir(cornerstoneDir, { recursive: true })
-    const destPath = path.join(cornerstoneDir, `${slug}.png`)
     const resPath = `res://assets/cornerstone/${slug}.png`
-
-    // Build prompt — include aspect ratio hint for composition guidance
-    let prompt = `${artDirection}. ${params.subject}, ${params.aspect_ratio} composition`
-    if (params.previous_feedback) {
-      prompt = `${prompt}. [Refinement: ${params.previous_feedback}]`
-    }
-
-    // Style reference: explicit param > style profile > generate without reference
-    const genParams: Record<string, unknown> = {
-      aspect_ratio: params.aspect_ratio,
-    }
     const refPath = params.reference_image ?? profile?.reference_asset
+
+    // Validate reference image exists if provided
     if (refPath) {
       const refAbsPath = refPath.startsWith("res://")
         ? path.join(projectRoot, refPath.slice(6))
         : path.join(projectRoot, refPath)
       try {
         await fs.access(refAbsPath)
-        genParams.input_image = refPath
       } catch {
         return {
           title: "Cornerstone: reference image not found",
@@ -1143,66 +1202,48 @@ export const GodotCornerstoneGenerateTool = Tool.define("godot_cornerstone_gener
       }
     }
 
-    ctx.metadata({ title: `Cornerstone: generating ${params.subject} (attempt ${params.attempt}/${params.max_retries})...` })
-
-    const result = await generateImage({
-      type: "texture",
-      prompt,
-      model: params.model ?? getModelDefaults().cornerstone,
-      parameters: genParams,
-      destPath,
-      abortSignal: ctx.abort,
-    })
-
-    if (!result.success) {
-      if (result.error === "Aborted") {
-        return { title: "Cornerstone cancelled", metadata: { error: "Aborted" } as Record<string, any>, output: "Generation was cancelled by user." }
-      }
-      return {
-        title: "Cornerstone generation failed",
-        metadata: { error: result.error ?? "Unknown error", attempt: params.attempt } as Record<string, any>,
-        output: `Generation failed (attempt ${params.attempt}/${params.max_retries}): ${result.error ?? "Unknown error"}${params.attempt < params.max_retries ? "\nYou may retry with adjusted prompt." : ""}`,
-      }
-    }
-
-    // Write metadata
-    const assetMeta: AssetProvider.AssetMetadata = {
-      origin: "generated",
+    // Delegate to asset pipeline (no post-processing for cornerstones)
+    const pipeline = await GodotAssetPipelineTool.init()
+    const result = await pipeline.execute({
+      prompt: `${params.subject}, ${params.aspect_ratio} composition`,
+      destination: resPath,
       asset_type: "texture",
-      prompt,
-      provider: result.provider,
-      model: result.model,
-      generation_id: result.generationId,
-      parameters: genParams,
+      requirements: { match_size: false, min_score: 7 },
+      model: params.model ?? getModelDefaults().cornerstone,
+      reference_image: refPath,
+      use_project_style: true,
+      attempt: params.attempt,
+      max_retries: params.max_retries,
+      previous_feedback: params.previous_feedback,
       usage: {
         role: `${params.asset_type} cornerstone (${params.aspect_ratio})`,
         transparent_bg: false,
         tiling: "none" as const,
       },
-      created_at: new Date().toISOString(),
-      version: params.attempt,
+    }, ctx)
+
+    // Re-wrap with cornerstone-specific output
+    const pipelineMeta = result.metadata as Record<string, any>
+    if (pipelineMeta.error) {
+      return result
     }
-    await AssetMetadata.write(destPath, assetMeta)
 
     ctx.metadata({ title: `Cornerstone: ${params.subject} generated ✓` })
 
     return {
+      ...result,
       title: `Cornerstone: ${slug} (attempt ${params.attempt}/${params.max_retries})`,
       metadata: {
-        destination: resPath,
+        ...pipelineMeta,
         asset_type: params.asset_type,
-        has_reference: !!genParams.input_image,
-        attempt: params.attempt,
-        provider: result.provider,
-        model: result.model,
-        generation_id: result.generationId,
-      } as Record<string, any>,
+        has_reference: !!refPath,
+      },
       output: `Cornerstone asset generated (attempt ${params.attempt}/${params.max_retries}).
 
 Destination: ${resPath}
 Subject: "${params.subject}"
 Category: ${params.asset_type}
-${genParams.input_image ? `Reference: ${genParams.input_image}` : "No reference image — this asset establishes the visual style"}
+${refPath ? `Reference: ${refPath}` : "No reference image — this asset establishes the visual style"}
 
 SCORE the result 1-10:
   - Style Consistency (3x) — does it match the project art style?
@@ -1211,7 +1252,7 @@ SCORE the result 1-10:
   - Category Fit (1x) — suitable as a ${params.asset_type} asset?
 
 DECIDE:
-  - Score >= 7: Reply "PASS — Score: X/10" and confirm at ${resPath}${!genParams.input_image ? "\n    Then call godot_style_set to set reference_asset to this path for subsequent assets." : ""}
+  - Score >= 7: Reply "PASS — Score: X/10" and confirm at ${resPath}${!refPath ? "\n    Then call godot_style_set to set reference_asset to this path for subsequent assets." : ""}
   - Score < 7 AND attempt < ${params.max_retries}: Call godot_cornerstone_generate again with attempt=${params.attempt + 1}, previous_feedback="[your suggestions]"
   - Score < 7 AND attempt >= ${params.max_retries}: Reply "FAIL — Score: X/10 — max retries reached"`,
     }

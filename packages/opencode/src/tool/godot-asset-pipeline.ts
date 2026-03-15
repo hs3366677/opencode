@@ -35,10 +35,13 @@ Pipeline: generate via Replicate API → automatic post-processing (remove bg �
 
 Post-processing is AUTOMATIC and FIXED — you do NOT need to call godot_asset_remove_bg or godot_asset_postprocess separately.
 
+IMPORTANT — Iterating on existing assets:
+When the user asks to IMPROVE, OPTIMIZE, or REGENERATE an existing asset, you MUST pass the current asset's res:// path as reference_image. This sends the existing image to the generation model as an image-to-image reference, producing a refined version instead of generating from scratch.
+
 After the tool returns, you MUST:
-1. VISUALLY INSPECT the attached image (first = final processed, second = style reference if present)
+1. VISUALLY INSPECT the attached image (first = final processed, second = style reference if present, third = reference image if provided)
 2. SCORE the final result x/10
-3. PASS (score >= min_score) or RETRY (call this tool again with attempt+1 and previous_feedback)
+3. PASS (score >= min_score) or RETRY (call this tool again with attempt+1, previous_feedback, AND reference_image pointing to the latest version)
 
 Max retries controlled by max_retries param.`
 
@@ -53,13 +56,12 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       .describe("Asset type for provider resolution"),
     requirements: z
       .object({
-        width: z.number().int().positive().optional().describe("Target width in pixels"),
-        height: z.number().int().positive().optional().describe("Target height in pixels"),
-        transparent_bg: z.boolean().default(true).describe("Remove background and make transparent (default: true for sprites)"),
+        crop: z.boolean().optional().describe("Crop to non-transparent pixels after bg removal. Defaults to true when transparent_bg is true, false otherwise."),
+        match_size: z.boolean().default(true).describe("Resize and pad to match usage width/height exactly"),
         min_score: z.number().min(1).max(10).default(7).describe("Minimum score to pass (soft check, x/10)"),
       })
-      .default({})
-      .describe("Quality requirements — dimensions are enforced via auto post-processing"),
+      .default({ match_size: true, min_score: 7 })
+      .describe("Pipeline control flags"),
     negative_prompt: z.string().optional().describe("What to avoid in generation"),
     model: z.string().optional().describe("Override model (default: from style profile or project config)"),
     style_reference: z.string().optional().describe("res:// path to override style reference image"),
@@ -70,6 +72,28 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       .string()
       .optional()
       .describe("Your feedback from the previous attempt — used to refine prompt on retry"),
+    reference_image: z
+      .string()
+      .optional()
+      .describe("res:// path to an existing asset to use as image-to-image reference. MUST be provided when improving/optimizing an existing asset."),
+    prompt_strength: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("How much to deviate from reference_image. 0 = almost identical, 1 = ignore reference. Only used with reference_image."),
+    usage: z
+      .object({
+        role: z.string(),
+        transparent_bg: z.boolean().optional(),
+        tiling: z.enum(["none", "horizontal", "vertical", "both"]).optional(),
+        scene: z.string().optional(),
+        node_path: z.string().optional(),
+        width: z.number().int().positive().optional(),
+        height: z.number().int().positive().optional(),
+      })
+      .optional()
+      .describe("Usage metadata to attach to the asset (overrides placeholder usage)"),
   }),
   async execute(params, ctx) {
     const projectRoot = Instance.directory
@@ -79,19 +103,27 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
 
     const destPath = resolveResPath(params.destination)
     const existingMeta = await AssetMetadata.read(destPath)
-    const usage = existingMeta?.usage
+    const usage = params.usage ?? existingMeta?.usage
 
-    // Auto-fill requirements from usage (explicit params take priority)
-    const requirements = {
-      width: params.requirements.width ?? usage?.width,
-      height: params.requirements.height ?? usage?.height,
-      transparent_bg: params.requirements.transparent_bg ?? usage?.transparent_bg ?? true,
-      min_score: params.requirements.min_score ?? 7,
+    // Derive post-processing settings from usage
+    const transparent_bg = usage?.transparent_bg ?? true
+    const targetW = usage?.width
+    const targetH = usage?.height
+    const shouldCrop = params.requirements.crop ?? transparent_bg
+    const matchSize = params.requirements.match_size ?? true
+    const minScore = params.requirements.min_score ?? 7
+
+    // ── Step 1: Build generation prompt and effective prompt ────────────
+    //
+    // generationPrompt = user intent (prompt + retry feedback) — saved to metadata
+    // effectivePrompt  = generationPrompt + runtime context (art_direction, aspect hints) — sent to API only
+
+    let generationPrompt = params.prompt
+    if (params.previous_feedback) {
+      generationPrompt = `${generationPrompt}. [Refinement: ${params.previous_feedback}]`
     }
 
-    // ── Step 1: Build effective prompt with style profile ──────────────
-
-    let effectivePrompt = params.prompt
+    let effectivePrompt = generationPrompt
     let effectiveModel = params.model ?? getModelDefaults().image_generation
     let effectiveParameters: Record<string, unknown> = {}
     let refImageAbsPath: string | undefined
@@ -113,10 +145,26 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       }
     }
 
-    // Append aspect ratio hint derived from target dimensions
-    if (requirements.width && requirements.height) {
-      const w = requirements.width
-      const h = requirements.height
+    // Override with explicit reference_image (img2img for iterative refinement)
+    if (params.reference_image) {
+      effectiveParameters.input_image = params.reference_image
+      refImageAbsPath = resolveResPath(params.reference_image)
+      if (params.prompt_strength !== undefined) {
+        effectiveParameters.prompt_strength = params.prompt_strength
+      }
+    }
+
+    // Append background transparency hint to guide generation
+    if (transparent_bg) {
+      effectivePrompt = `${effectivePrompt}. isolated subject on plain solid-color background, no complex background`
+    } else {
+      effectivePrompt = `${effectivePrompt}. include full background scene`
+    }
+
+    // Append aspect ratio hint derived from target dimensions (runtime context only)
+    if (targetW && targetH) {
+      const w = targetW
+      const h = targetH
       const ratio = w / h
       let compositionHint: string
       if (Math.abs(ratio - 1) < 0.1) {
@@ -129,12 +177,11 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       effectivePrompt = `${effectivePrompt}. ${compositionHint}, output ${w}x${h}px`
     }
 
-    // Append previous feedback as refinement context on retry
-    if (params.previous_feedback) {
-      effectivePrompt = `${effectivePrompt}. [Refinement from previous attempt: ${params.previous_feedback}]`
-    }
-
     // ── Step 2: Generate image ─────────────────────────────────────────
+
+    // Pass target dimensions to provider so it can compute correct aspect_ratio
+    if (targetW) effectiveParameters.width = targetW
+    if (targetH) effectiveParameters.height = targetH
 
     ctx.metadata({ title: `Pipeline: generating (attempt ${params.attempt}/${params.max_retries})...` })
 
@@ -174,28 +221,30 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
 
     ctx.metadata({ title: `Pipeline: post-processing (attempt ${params.attempt}/${params.max_retries})...` })
 
-    // 3a. Remove background → transparent
-    if (requirements.transparent_bg) {
-      const { removeBackground } = await import("@imgly/background-removal-node")
-      const inputBlob = new Blob([imageBuffer], { type: "image/png" })
-      const resultBlob = await removeBackground(inputBlob, { model: "small" })
-      imageBuffer = Buffer.from(await resultBlob.arrayBuffer())
-      postProcessingLog.push("remove_bg(small)")
-    }
-
-    // 3b. Trim to non-transparent pixels (only if we have transparency)
-    if (requirements.transparent_bg) {
-      const trimmed = await sharp(imageBuffer)
-        .trim({ threshold: 10 })
-        .toBuffer()
-      imageBuffer = trimmed
-      postProcessingLog.push("trim(threshold=10)")
+    // 3a. Remove background → transparent (via PhotoRoom API)
+    if (transparent_bg) {
+      const photoRoomKey = process.env.PHOTOROOM_API_KEY
+      if (!photoRoomKey) {
+        throw new Error("PHOTOROOM_API_KEY not set — add it to your .env.keys file (see .env.keys.example)")
+      }
+      const formData = new FormData()
+      formData.append("image_file", new Blob([new Uint8Array(imageBuffer)], { type: "image/png" }), "image.png")
+      formData.append("crop", shouldCrop ? "true" : "false")
+      const rbgResponse = await fetch("https://sdk.photoroom.com/v1/segment", {
+        method: "POST",
+        headers: { "x-api-key": photoRoomKey },
+        body: formData,
+      })
+      if (!rbgResponse.ok) {
+        const errText = await rbgResponse.text()
+        throw new Error(`PhotoRoom API failed (${rbgResponse.status}): ${errText}`)
+      }
+      imageBuffer = Buffer.from(await rbgResponse.arrayBuffer())
+      postProcessingLog.push(shouldCrop ? "remove_bg+crop(photoroom)" : "remove_bg(photoroom)")
     }
 
     // 3c. Resize to fit within target dimensions (keep aspect ratio)
-    const targetW = requirements.width
-    const targetH = requirements.height
-    if (targetW || targetH) {
+    if ((targetW || targetH) && matchSize) {
       imageBuffer = await sharp(imageBuffer)
         .resize(targetW ?? null, targetH ?? null, {
           fit: "inside",
@@ -208,7 +257,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
     }
 
     // 3d. Pad to exact target dimensions with transparent pixels
-    if (targetW && targetH) {
+    if (targetW && targetH && matchSize) {
       const currentMeta = await sharp(imageBuffer).metadata()
       const cw = currentMeta.width ?? targetW
       const ch = currentMeta.height ?? targetH
@@ -232,10 +281,27 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       }
     }
 
-    // ── Step 4: Save final image ────────────────────────────────────────
+    // ── Step 4: Save final image + raw for debugging ───────────────────
 
     await fs.mkdir(path.dirname(destPath), { recursive: true })
     await fs.writeFile(destPath, imageBuffer)
+
+    // Save both raw (from AI model) and processed (final) into version dir
+    // Determine next version number from existing history (not from attempt)
+    const verIndex0 = (await AssetMetadata.readVersionIndex(destPath)) ?? {}
+    const rawHistory0: any[] = verIndex0.history ?? []
+    const maxExisting = rawHistory0.reduce((max: number, h: any) => {
+      const v = typeof h === "number" ? h : (typeof h === "object" && h?.version ? h.version : 0)
+      return Math.max(max, v)
+    }, 0)
+    const version = maxExisting + 1
+    const verDir = AssetMetadata.getVersionDir(destPath)
+    await fs.mkdir(verDir, { recursive: true })
+    const ext = path.extname(destPath)
+    // Raw = direct output from AI model (before any post-processing)
+    await fs.writeFile(path.join(verDir, `v${version}_raw${ext}`), genResult.data)
+    // Processed = after remove_bg + trim + resize + pad
+    await fs.writeFile(path.join(verDir, `v${version}${ext}`), imageBuffer)
 
     const relPath = path.relative(projectRoot, destPath)
     const resPath = `res://${relPath.replace(/\\/g, "/")}`
@@ -246,7 +312,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
     const assetMetadata: AssetProvider.AssetMetadata = {
       origin: "generated",
       asset_type: params.asset_type as AssetProvider.AssetType,
-      prompt: effectivePrompt,
+      prompt: generationPrompt,
       negative_prompt: params.negative_prompt,
       provider: provider.id,
       model: modelId,
@@ -254,13 +320,49 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       parameters: effectiveParameters,
       usage,
       created_at: new Date().toISOString(),
-      version: params.attempt,
+      version,
       post_processing: postProcessingLog.map((op) => ({
         operation: op,
         timestamp: new Date().toISOString(),
       })),
     }
     await AssetMetadata.write(destPath, assetMetadata)
+
+    // Save per-version metadata (vN.json) for history
+    const verMeta = {
+      version,
+      origin: "generated",
+      prompt: generationPrompt,
+      negative_prompt: params.negative_prompt ?? "",
+      provider: provider.id,
+      model: modelId ?? "",
+      seed: -1,
+      parameters: effectiveParameters,
+      generated_at: new Date().toISOString(),
+      raw_dimensions: `${rawMeta.width}x${rawMeta.height}`,
+      final_dimensions: `${finalMeta.width}x${finalMeta.height}`,
+      post_processing: postProcessingLog,
+      has_raw: true,
+    }
+    await fs.writeFile(
+      path.join(verDir, `v${version}.json`),
+      JSON.stringify(verMeta, null, 2),
+      "utf-8",
+    )
+
+    // Update version index (metadata.json) with history tracking
+    const verIndex = (await AssetMetadata.readVersionIndex(destPath)) ?? {}
+    verIndex.current_version = version
+    // Normalize history to integer array (old cornerstone wrote object arrays)
+    const rawHistory: any[] = verIndex.history ?? []
+    const history: number[] = rawHistory
+      .map((h: any) => typeof h === "number" ? h : (typeof h === "object" && h?.version ? h.version : null))
+      .filter((v: any): v is number => typeof v === "number" && v > 0)
+    if (!history.includes(version)) {
+      history.push(version)
+    }
+    verIndex.history = history
+    await AssetMetadata.writeVersionIndex(destPath, { ...assetMetadata, ...verIndex })
 
     // ── Step 5: Build attachments for LLM vision ──────────────────────
 
@@ -315,9 +417,9 @@ SCORE the final result (first attachment) on a scale of 1-10:
   - Palette Compliance (1x weight) — does it follow the project palette?
 
 DECIDE:
-  - Score >= ${requirements.min_score}: Reply "PASS — Score: X/10" and confirm the asset at ${resPath}
-  - Score < ${requirements.min_score} AND attempt < ${params.max_retries}: Call godot_asset_pipeline again with attempt=${params.attempt + 1}, previous_feedback="[your specific suggestions]"
-  - Score < ${requirements.min_score} AND attempt >= ${params.max_retries}: Reply "FAIL — Score: X/10 — max retries reached" and ask the user what to do`
+  - Score >= ${minScore}: Reply "PASS — Score: X/10" and confirm the asset at ${resPath}
+  - Score < ${minScore} AND attempt < ${params.max_retries}: Call godot_asset_pipeline again with attempt=${params.attempt + 1}, previous_feedback="[your specific suggestions]"
+  - Score < ${minScore} AND attempt >= ${params.max_retries}: Reply "FAIL — Score: X/10 — max retries reached" and ask the user what to do`
 
     return {
       title: `Pipeline: attempt ${params.attempt}/${params.max_retries}`,

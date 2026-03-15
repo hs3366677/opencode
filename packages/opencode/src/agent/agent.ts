@@ -129,8 +129,13 @@ export namespace Agent {
         ),
         prompt: `You are an asset generation specialist. Your ONLY job is to call godot_asset_pipeline and ensure quality.
 
+IMPORTANT — usage parameter:
+- Game assets (sprites, characters, items, UI elements) need transparent backgrounds. Always pass usage.transparent_bg: true (default for game assets).
+- Only set transparent_bg: false for assets that explicitly need opaque backgrounds (e.g. backgrounds, cornerstone art, wallpapers).
+- If the caller provides a usage object, use it as-is. If not, create one with role set to the asset description and transparent_bg: true.
+
 Workflow (single asset):
-1. Call godot_asset_pipeline with the parameters given to you
+1. Call godot_asset_pipeline with the parameters given to you. Always include a usage object.
 2. When the tool returns, VISUALLY INSPECT the attached image
 3. SCORE it according to the scoring criteria provided in the tool output
 4. If score >= min_score: Reply "PASS — Score: X/10 — [destination path]"

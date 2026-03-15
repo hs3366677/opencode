@@ -323,6 +323,7 @@ export namespace MessageV2 {
     system: z.string().optional(),
     tools: z.record(z.string(), z.boolean()).optional(),
     variant: z.string().optional(),
+    autotest: z.boolean().optional(),
   }).meta({
     ref: "UserMessage",
   })
@@ -434,7 +435,7 @@ export namespace MessageV2 {
   })
   export type WithParts = z.infer<typeof WithParts>
 
-  export function toModelMessages(input: WithParts[], model: Provider.Model): ModelMessage[] {
+  export async function toModelMessages(input: WithParts[], model: Provider.Model): Promise<ModelMessage[]> {
     const result: UIMessage[] = []
     const toolNames = new Set<string>()
 
@@ -488,13 +489,23 @@ export namespace MessageV2 {
               text: part.text,
             })
           // text/plain and directory files are converted into text parts, ignore them
-          if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory")
+          if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
+            let url = part.url
+            let mime = part.mime
+            // Compress images that exceed the API size limit
+            if (mime.startsWith("image/") && url.startsWith("data:")) {
+              const { compressDataUrl } = await import("../util/image")
+              const compressed = await compressDataUrl(url)
+              url = compressed.url
+              mime = compressed.mime || mime
+            }
             userMessage.parts.push({
               type: "file",
-              url: part.url,
-              mediaType: part.mime,
+              url,
+              mediaType: mime,
               filename: part.filename,
             })
+          }
 
           if (part.type === "compaction") {
             userMessage.parts.push({
@@ -543,7 +554,18 @@ export namespace MessageV2 {
             toolNames.add(part.tool)
             if (part.state.status === "completed") {
               const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
-              const attachments = part.state.time.compacted ? [] : (part.state.attachments ?? [])
+              const rawAttachments = part.state.time.compacted ? [] : (part.state.attachments ?? [])
+              // Pre-compress oversized image attachments before they reach the sync toModelOutput
+              const { compressDataUrl } = await import("../util/image")
+              const attachments = await Promise.all(
+                rawAttachments.map(async (att: { mime: string; url: string; [k: string]: unknown }) => {
+                  if (att.mime.startsWith("image/") && att.url.startsWith("data:")) {
+                    const compressed = await compressDataUrl(att.url)
+                    return { ...att, url: compressed.url, mime: compressed.mime || att.mime }
+                  }
+                  return att
+                }),
+              )
               const output =
                 attachments.length > 0
                   ? {

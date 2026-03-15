@@ -40,6 +40,7 @@ export namespace Skill {
 
   const OPENCODE_SKILL_GLOB = new Bun.Glob("{skill,skills}/**/SKILL.md")
   const CLAUDE_SKILL_GLOB = new Bun.Glob("skills/**/SKILL.md")
+  const PROMPTS_SKILL_GLOB = new Bun.Glob("prompts/skills/**/SKILL.md")
 
   export const state = Instance.state(async () => {
     const skills: Record<string, Info> = {}
@@ -120,6 +121,33 @@ export namespace Skill {
       })) {
         await addSkill(match)
       }
+    }
+
+    // Scan engine prompts/skills/ directory (Makabaka Engine bundled skills)
+    // Walk up from OpenCode source to find the engine root containing prompts/
+    let candidate = path.resolve(__dirname)
+    for (let i = 0; i < 8; i++) {
+      const promptsDir = path.join(candidate, "prompts", "skills")
+      if (await Filesystem.isDir(promptsDir)) {
+        const matches = await Array.fromAsync(
+          PROMPTS_SKILL_GLOB.scan({
+            cwd: candidate,
+            absolute: true,
+            onlyFiles: true,
+            followSymlinks: true,
+          }),
+        ).catch((error) => {
+          log.error("failed prompts directory scan for skills", { dir: candidate, error })
+          return []
+        })
+        for (const match of matches) {
+          await addSkill(match)
+        }
+        break
+      }
+      const parent = path.dirname(candidate)
+      if (parent === candidate) break
+      candidate = parent
     }
 
     return skills

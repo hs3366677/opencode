@@ -151,11 +151,12 @@ export class ReplicateProvider implements AssetProvider.Provider {
       throw new Error(`Unknown Replicate model: ${modelId}. Available: ${Object.keys(ReplicateProvider.MODELS).join(", ")}`)
     }
 
-    // For FLUX.2 Pro: load reference image if provided (supports up to 8 input images)
+    // For FLUX.2 Pro and Nano Banana 2: load reference image if provided
     let effectivePrompt = request.prompt
     let inputImageDataUrl: string | undefined
+    const supportsInputImage = ReplicateProvider.FLUX2_MODELS.has(modelId) || modelId === "nano-banana-2"
 
-    if (ReplicateProvider.FLUX2_MODELS.has(modelId) && request.parameters.input_image) {
+    if (supportsInputImage && request.parameters.input_image) {
       const inputImagePath = String(request.parameters.input_image)
       let absPath = inputImagePath
       if (inputImagePath.startsWith("res://")) {
@@ -167,9 +168,9 @@ export class ReplicateProvider implements AssetProvider.Provider {
         const mimeType = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png"
         inputImageDataUrl = `data:${mimeType};base64,${imgData.toString("base64")}`
         effectivePrompt = `Maintain the exact same art style, color palette, and visual quality as the reference image. ${request.prompt}`
-        this.log.info("flux-2-pro img2img: loaded reference image", { path: absPath, size: imgData.length })
+        this.log.info("img2img: loaded reference image", { model: modelId, path: absPath, size: imgData.length })
       } catch (err: any) {
-        this.log.warn("flux-2-pro img2img: failed to load reference image, falling back to text-only", { path: absPath, error: err.message })
+        this.log.warn("img2img: failed to load reference image, falling back to text-only", { model: modelId, path: absPath, error: err.message })
       }
     }
 
@@ -179,6 +180,11 @@ export class ReplicateProvider implements AssetProvider.Provider {
 
     if (inputImageDataUrl) {
       input.input_image = inputImageDataUrl
+    }
+
+    // Nano Banana 2: enable image search for better results
+    if (modelId === "nano-banana-2") {
+      input.image_search = true
     }
 
     if (request.negativePrompt) {
