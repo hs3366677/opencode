@@ -4,6 +4,7 @@ import { Instance } from "../project/instance"
 import { GodotCommands, GodotScreenshots } from "../server/routes/godot"
 import { Identifier } from "../id/id"
 import type { MessageV2 } from "../session/message-v2"
+import { compressImageBase64 } from "../util/image"
 
 const DESCRIPTION = `Capture a screenshot of the running Godot game and return it as an image for visual analysis.
 
@@ -101,15 +102,20 @@ export const GodotScreenshotTool = Tool.define("godot_screenshot", {
       }
     }
 
-    // Build FilePart attachments
-    const attachments: MessageV2.FilePart[] = results.map((data) => ({
-      id: Identifier.ascending("part"),
-      sessionID: ctx.sessionID,
-      messageID: ctx.messageID,
-      type: "file" as const,
-      mime: "image/png",
-      url: `data:image/png;base64,${data}`,
-    }))
+    // Compress screenshots if needed (Anthropic API has 5MB limit per image)
+    const attachments: MessageV2.FilePart[] = await Promise.all(
+      results.map(async (data) => {
+        const compressed = await compressImageBase64(data, "image/png")
+        return {
+          id: Identifier.ascending("part"),
+          sessionID: ctx.sessionID,
+          messageID: ctx.messageID,
+          type: "file" as const,
+          mime: compressed.mime,
+          url: `data:${compressed.mime};base64,${compressed.data}`,
+        }
+      }),
+    )
 
     const focusLine = params.focus ? `\nFocus area: **${params.focus}**\n` : ""
     const countLabel = params.count > 1 ? `${params.count} frames captured` : "Screenshot captured"
@@ -121,4 +127,4 @@ export const GodotScreenshotTool = Tool.define("godot_screenshot", {
       attachments,
     }
   },
-})
+}, { testOnly: true })

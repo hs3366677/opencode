@@ -204,19 +204,17 @@ Examples:
 })
 
 // =============================================================================
-// godot_asset_remove_bg — AI-powered background removal using ONNX model
+// godot_asset_remove_bg — Background removal via PhotoRoom API
 // =============================================================================
 
 export const GodotAssetRemoveBgTool = Tool.define("godot_asset_remove_bg", {
-  description: `Remove the background from an image using a local AI model (ONNX-based, runs entirely on your machine).
+  description: `Remove the background from an image using the PhotoRoom API.
 Works on any background — complex scenes, gradients, photos — not just solid colors.
+Automatically crops to the subject. Output is always PNG (to preserve transparency).
 
-The first run downloads the model (~40MB for small, ~80MB for medium). Subsequent runs are instant.
-
-Output is always PNG (to preserve transparency).`,
+Requires PHOTOROOM_API_KEY in .env.keys.`,
   parameters: z.object({
     asset_path: z.string().describe("res:// path to the image file"),
-    model: z.enum(["small", "medium"]).optional().describe("Model size: small (fast, ~40MB) or medium (better quality, ~80MB). Default: small"),
   }),
   async execute(params) {
     const absPath = resolveAssetPath(params.asset_path)
@@ -232,28 +230,40 @@ Output is always PNG (to preserve transparency).`,
       }
     }
 
+    const photoRoomKey = process.env.PHOTOROOM_API_KEY
+    if (!photoRoomKey) {
+      return {
+        title: "Remove BG failed",
+        metadata: { error: "missing_api_key" },
+        output: `Error: PHOTOROOM_API_KEY not set — add it to your .env.keys file (see .env.keys.example)`,
+      }
+    }
+
     // Save version before modifying
     await AssetMetadata.saveVersion(absPath)
 
-    const modelChoice = params.model ?? "small"
-
-    // Lazy-load background removal
-    const { removeBackground } = await import("@imgly/background-removal-node")
-
-    // Read the image as a buffer
     const inputBuffer = await fs.readFile(absPath)
 
-    // Create a Blob from the buffer (required by the library)
-    const inputBlob = new Blob([inputBuffer], { type: "image/png" })
+    const formData = new FormData()
+    formData.append("image_file", new Blob([new Uint8Array(inputBuffer)], { type: "image/png" }), "image.png")
+    formData.append("crop", "true")
 
-    // Run background removal
-    const resultBlob = await removeBackground(inputBlob, {
-      model: modelChoice,
+    const response = await fetch("https://sdk.photoroom.com/v1/segment", {
+      method: "POST",
+      headers: { "x-api-key": photoRoomKey },
+      body: formData,
     })
 
-    // Convert result Blob back to Buffer
-    const resultArrayBuffer = await resultBlob.arrayBuffer()
-    const resultBuffer = Buffer.from(resultArrayBuffer)
+    if (!response.ok) {
+      const errText = await response.text()
+      return {
+        title: "Remove BG failed",
+        metadata: { error: `PhotoRoom API ${response.status}` },
+        output: `Error: PhotoRoom API failed (${response.status}): ${errText}`,
+      }
+    }
+
+    const resultBuffer = Buffer.from(await response.arrayBuffer())
 
     // Ensure output is PNG (for transparency)
     let outputPath = absPath
@@ -269,8 +279,8 @@ Output is always PNG (to preserve transparency).`,
     if (existingMeta) {
       const postProcessing = existingMeta.post_processing ?? []
       postProcessing.push({
-        operation: "remove_bg",
-        params: { model: modelChoice },
+        operation: "remove_bg+crop",
+        params: { provider: "photoroom" },
         timestamp: new Date().toISOString(),
       })
       await AssetMetadata.update(absPath, { post_processing: postProcessing } as any)
@@ -286,9 +296,8 @@ Output is always PNG (to preserve transparency).`,
         path: params.asset_path,
         output_path: outputPath !== absPath ? outputPath : undefined,
         dimensions: `${meta.width}x${meta.height}`,
-        model: modelChoice,
       },
-      output: `Background removed from ${params.asset_path} using ${modelChoice} model.\nResult: ${meta.width}x${meta.height} PNG${outputPath !== absPath ? `\nSaved to: ${outputPath}` : ""}`,
+      output: `Background removed from ${params.asset_path} (PhotoRoom + crop).\nResult: ${meta.width}x${meta.height} PNG${outputPath !== absPath ? `\nSaved to: ${outputPath}` : ""}`,
     }
   },
 })

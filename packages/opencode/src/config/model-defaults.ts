@@ -28,6 +28,14 @@ export interface ModelDefaults {
   audio_sfx: string
   /** Default model for music generation */
   audio_music: string
+  /** LLM model ID for UI measurement vision analysis (empty = use session's default LLM) */
+  ui_measure_llm: string
+  /** Custom API base URL for UI measurement (e.g. Volcengine Ark). When set, calls this API directly instead of the provider system. */
+  ui_measure_api_base: string
+  /** API key for the custom UI measurement endpoint */
+  ui_measure_api_key: string
+  /** Model name for the custom UI measurement endpoint */
+  ui_measure_model: string
 }
 
 const BUILTIN_DEFAULTS: ModelDefaults = {
@@ -42,6 +50,10 @@ const BUILTIN_DEFAULTS: ModelDefaults = {
   image_doubao: "seedream-4",
   audio_sfx: "suno-sfx",
   audio_music: "suno-v5",
+  ui_measure_llm: "",
+  ui_measure_api_base: "",
+  ui_measure_api_key: "",
+  ui_measure_model: "",
 }
 
 function findEngineRoot(): string | null {

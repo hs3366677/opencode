@@ -3,7 +3,7 @@ import { Log } from "../../util/log"
 import fs from "fs/promises"
 import path from "path"
 import { Instance } from "../../project/instance"
-import { readProfile, writeProfile } from "../../provider/asset/style-profile"
+import { readProfile, writeProfile, defaultProfile } from "../../provider/asset/style-profile"
 import { getModelDefaults } from "../../config/model-defaults"
 import { AssetMetadata } from "../../provider/asset/metadata"
 import type { AssetProvider } from "../../provider/asset/asset-provider"
@@ -47,7 +47,7 @@ export namespace GodotScreenshots {
 }
 
 // ── In-memory eval result store ──────────────────────────────────────────────
-// Eval results are posted by Godot editor and consumed by the godot_eval tool.
+// Eval results are posted by Godot editor and consumed by the sim tool.
 
 interface EvalResult {
   value: string
@@ -70,6 +70,59 @@ export namespace GodotEvalResults {
     const result = evalResults.get(id)
     if (!result) return null
     return { value: result.value, error: result.error }
+  }
+}
+
+// ── In-memory log result store ────────────────────────────────────────────────
+// Log results are posted by Godot editor and consumed by the godot_logs tool.
+
+interface LogResult {
+  content: string
+  lineCount: number
+  timestamp: number
+}
+
+const logResults = new Map<string, LogResult>()
+
+export namespace GodotLogResults {
+  /** Store a log result from Godot editor. */
+  export function store(id: string, content: string, lineCount: number) {
+    logResults.set(id, { content, lineCount, timestamp: Date.now() })
+    // Auto-cleanup after 30 seconds
+    setTimeout(() => logResults.delete(id), 30_000)
+  }
+
+  /** Poll for a log result. Returns null if not ready yet. */
+  export function get(id: string): { content: string; lineCount: number } | null {
+    const result = logResults.get(id)
+    if (!result) return null
+    return { content: result.content, lineCount: result.lineCount }
+  }
+}
+
+// ── In-memory record result store ─────────────────────────────────────────────
+// GIF recording results: Godot posts base64 PNG frames, OpenCode encodes to GIF.
+
+interface RecordResult {
+  frames: string[] // base64-encoded PNG frames
+  timestamp: number
+}
+
+const recordResults = new Map<string, RecordResult>()
+
+export namespace GodotRecordResults {
+  /** Store a recording result from Godot editor. */
+  export function store(id: string, frames: string[]) {
+    recordResults.set(id, { frames, timestamp: Date.now() })
+    // Auto-cleanup after 120 seconds
+    setTimeout(() => recordResults.delete(id), 120_000)
+  }
+
+  /** Poll for a recording result. Returns null if not ready yet. */
+  export function get(id: string): string[] | null {
+    const result = recordResults.get(id)
+    if (!result) return null
+    return result.frames
   }
 }
 
@@ -171,6 +224,111 @@ export function GodotRoutes() {
       return c.json({ ready: true, ...result })
     })
 
+    // Godot editor POSTs log content here after get_logs command
+    .post("/log-result", async (c) => {
+      const { id, content, lineCount } = await c.req.json<{ id: string; content: string; lineCount: number }>()
+      if (!id) {
+        return c.json({ error: "Missing id" }, 400)
+      }
+      GodotLogResults.store(id, content ?? "", lineCount ?? 0)
+      log.info("log result stored", { id, lineCount })
+      return c.json({ success: true })
+    })
+
+    // Tool polls this endpoint to get a log result by ID
+    .get("/log/:id", async (c) => {
+      const id = c.req.param("id")
+      const result = GodotLogResults.get(id)
+      if (!result) {
+        return c.json({ ready: false })
+      }
+      return c.json({ ready: true, ...result })
+    })
+
+    // Godot editor POSTs recording frames here after F10 stop
+    // Accepts either { id, frames: base64[] } or { id, framePaths: string[], fps }
+    .post("/record-result", async (c) => {
+      const body = await c.req.json<{ id: string; frames?: string[]; framePaths?: string[]; fps?: number }>()
+      const { id } = body
+      if (!id) {
+        return c.json({ error: "Missing id" }, 400)
+      }
+
+      let frames: string[]
+      if (body.framePaths?.length) {
+        // Read frames from disk (file-based approach for large recordings)
+        frames = []
+        for (const fp of body.framePaths) {
+          try {
+            const data = await fs.readFile(fp)
+            frames.push(data.toString("base64"))
+          } catch (e: any) {
+            log.warn("Failed to read frame file", { path: fp, error: e.message })
+          }
+        }
+      } else if (body.frames?.length) {
+        frames = body.frames
+      } else {
+        return c.json({ error: "Missing frames or framePaths" }, 400)
+      }
+
+      if (frames.length === 0) {
+        return c.json({ error: "No frames loaded" }, 400)
+      }
+
+      GodotRecordResults.store(id, frames)
+      log.info("record result stored", { id, frameCount: frames.length })
+
+      // Encode GIF and save to temp file using sharp for PNG decoding
+      const fps = body.fps || 10
+      try {
+        const { GIFEncoder, quantize, applyPalette } = await import("gifenc")
+        const sharp = (await import("sharp")).default
+
+        // Decode first frame to get dimensions
+        const firstBuf = Buffer.from(frames[0], "base64")
+        const firstMeta = await sharp(firstBuf).metadata()
+        const width = firstMeta.width!
+        const height = firstMeta.height!
+
+        const gif = GIFEncoder()
+        const delay = Math.round(1000 / fps)
+
+        for (const frame of frames) {
+          const buf = Buffer.from(frame, "base64")
+          // Decode PNG to raw RGBA using sharp
+          const rgba = await sharp(buf).ensureAlpha().raw().toBuffer()
+          const palette = quantize(rgba, 256)
+          const indexed = applyPalette(rgba, palette)
+          gif.writeFrame(indexed, width, height, { palette, delay })
+        }
+
+        gif.finish()
+        const gifBytes = gif.bytes()
+
+        // Save GIF to temp file
+        const os = await import("os")
+        const gifPath = path.join(os.tmpdir(), `recording-${id}.gif`)
+        await fs.writeFile(gifPath, Buffer.from(gifBytes))
+        log.info("GIF encoded and saved", { id, gifPath, size: gifBytes.length, frames: frames.length })
+
+        return c.json({ success: true, gifPath, frameCount: frames.length })
+      } catch (e: any) {
+        log.error("GIF encoding failed", { id, error: e.message })
+        return c.json({ success: true, frameCount: frames.length, gifError: e.message })
+      }
+    })
+
+    // Tool polls this endpoint to get a recording result by ID
+    .get("/record/:id", async (c) => {
+      const id = c.req.param("id")
+      const frames = GodotRecordResults.get(id)
+      if (!frames) {
+        return c.json({ ready: false })
+      }
+      return c.json({ ready: true, frameCount: frames.length })
+    })
+
     // ── Art Director routes ──────────────────────────────────────────────────
 
     // GET current style profile
@@ -191,79 +349,142 @@ export function GodotRoutes() {
         return c.json({ error: "Missing reference_asset" }, 400)
       }
       const projectRoot = body.directory ?? Instance.directory
-      const profile = readProfile(projectRoot)
+      let profile = readProfile(projectRoot)
       if (!profile) {
-        return c.json({ error: "No style profile found. Set a style first." }, 404)
+        // Create a default profile if none exists
+        const defaults = defaultProfile()
+        profile = {
+          reference_asset,
+          art_direction: "",
+          consistency_model: defaults.consistency_model ?? "flux-kontext-pro",
+          consistency_strength: defaults.consistency_strength ?? 0.7,
+          palette: defaults.palette ?? [],
+          created_at: defaults.created_at ?? new Date().toISOString(),
+        }
+      } else {
+        profile.reference_asset = reference_asset
       }
-      profile.reference_asset = reference_asset
       await writeProfile(projectRoot, profile)
       log.info("set-reference updated", { reference_asset })
       return c.json({ success: true, reference_asset })
     })
 
-    // GET list exploration and cornerstone images
+    // GET list exploration sessions and cornerstone images
     .get("/art-director/images", async (c) => {
       const projectRoot = c.req.query("directory") ?? Instance.directory
-      const images: Array<{ category: string; resPath: string; absPath: string }> = []
 
-      const scanDir = async (category: string, absDir: string, resBase: string) => {
+      // Scan image files from a directory
+      const scanImages = async (absDir: string, resBase: string) => {
+        const images: Array<{ resPath: string; absPath: string; label?: string; tooltip?: string }> = []
         try {
           const entries = await fs.readdir(absDir, { withFileTypes: true })
           for (const entry of entries) {
-            // Skip directories (including .ai.* metadata dirs) and hidden files
             if (entry.isDirectory()) continue
             if (entry.name.startsWith(".")) continue
             if (/\.(png|jpg|jpeg|webp)$/i.test(entry.name)) {
-              const absPath = path.join(absDir, entry.name)
-              const img: Record<string, string> = {
-                category,
+              images.push({
                 resPath: `${resBase}/${entry.name}`,
-                absPath,
-              }
-              // For cornerstone assets, read metadata to get subject description
-              if (category === "cornerstone") {
-                try {
-                  const metaDir = path.join(absDir, `.ai.${entry.name}`)
-                  const metaContent = await fs.readFile(path.join(metaDir, "metadata.json"), "utf-8")
-                  const meta = JSON.parse(metaContent)
-                  if (meta.prompt) {
-                    // Prompt format: "{art_direction}. {subject description}"
-                    // Art direction often ends with period, producing ".." before subject.
-                    const doubleDot = meta.prompt.indexOf(".. ")
-                    let subject: string
-                    if (doubleDot >= 0) {
-                      subject = meta.prompt.slice(doubleDot + 3)
-                    } else {
-                      const sentences = meta.prompt.split(". ")
-                      subject = sentences.length > 1 ? sentences[sentences.length - 1] : meta.prompt
-                    }
-                    // Full first sentence → tooltip
-                    const firstSentence = subject.split(/\.\s/)[0]
-                    img.tooltip = firstSentence
+                absPath: path.join(absDir, entry.name),
+              })
+            }
+          }
+        } catch {
+          // Directory doesn't exist yet
+        }
+        return images
+      }
 
-                    // Short label: extract key noun phrase (strip filler words)
-                    const short = firstSentence
-                      .replace(/^(Single|A|An|The|One|Small|Large|Rectangular)\s+/i, "")
-                      .replace(/\s+(on|with|in|for|from|centered)\s+.*/i, "")
-                      .replace(/\s+(icon|design|asset|sprite|image|texture|symbol|element)\s*$/i, "")
-                    img.label = short.length > 24 ? short.slice(0, 22) + ".." : short
+      // Scan cornerstone with metadata
+      const scanCornerstone = async (absDir: string, resBase: string) => {
+        const images: Array<{ resPath: string; absPath: string; label?: string; tooltip?: string }> = []
+        try {
+          const entries = await fs.readdir(absDir, { withFileTypes: true })
+          for (const entry of entries) {
+            if (entry.isDirectory()) continue
+            if (entry.name.startsWith(".")) continue
+            if (/\.(png|jpg|jpeg|webp)$/i.test(entry.name)) {
+              const img: { resPath: string; absPath: string; label?: string; tooltip?: string } = {
+                resPath: `${resBase}/${entry.name}`,
+                absPath: path.join(absDir, entry.name),
+              }
+              try {
+                const metaDir = path.join(absDir, `.ai.${entry.name}`)
+                const metaContent = await fs.readFile(path.join(metaDir, "metadata.json"), "utf-8")
+                const meta = JSON.parse(metaContent)
+                if (meta.prompt) {
+                  const doubleDot = meta.prompt.indexOf(".. ")
+                  let subject: string
+                  if (doubleDot >= 0) {
+                    subject = meta.prompt.slice(doubleDot + 3)
+                  } else {
+                    const sentences = meta.prompt.split(". ")
+                    subject = sentences.length > 1 ? sentences[sentences.length - 1] : meta.prompt
                   }
-                } catch {
-                  // No metadata — fall back to filename
+                  const firstSentence = subject.split(/\.\s/)[0]
+                  img.tooltip = firstSentence
+                  const short = firstSentence
+                    .replace(/^(Single|A|An|The|One|Small|Large|Rectangular)\s+/i, "")
+                    .replace(/\s+(on|with|in|for|from|centered)\s+.*/i, "")
+                    .replace(/\s+(icon|design|asset|sprite|image|texture|symbol|element)\s*$/i, "")
+                  img.label = short.length > 24 ? short.slice(0, 22) + ".." : short
                 }
+              } catch {
+                // No metadata
               }
               images.push(img)
             }
           }
         } catch {
-          // Directory doesn't exist yet — that's OK
+          // Directory doesn't exist
         }
+        return images
       }
 
-      await scanDir("exploration", path.join(projectRoot, "assets", ".art_exploration"), "res://assets/.art_exploration")
-      await scanDir("cornerstone", path.join(projectRoot, "assets", "cornerstone"), "res://assets/cornerstone")
+      // Scan exploration sessions (subdirs of .art_exploration/)
+      const explorationBase = path.join(projectRoot, "assets", ".art_exploration")
+      const sessions: Array<{ id: string; images: Array<{ resPath: string; absPath: string }> }> = []
 
-      return c.json({ images })
+      try {
+        const entries = await fs.readdir(explorationBase, { withFileTypes: true })
+        // Collect session subdirs and loose files
+        const sessionDirs: string[] = []
+        const looseImages: Array<{ resPath: string; absPath: string }> = []
+
+        for (const entry of entries) {
+          if (entry.isDirectory() && entry.name.startsWith("session_")) {
+            sessionDirs.push(entry.name)
+          } else if (!entry.isDirectory() && !entry.name.startsWith(".") && /\.(png|jpg|jpeg|webp)$/i.test(entry.name)) {
+            looseImages.push({
+              resPath: `res://assets/.art_exploration/${entry.name}`,
+              absPath: path.join(explorationBase, entry.name),
+            })
+          }
+        }
+
+        // Sort session dirs newest first (session_YYYYMMDD_HHmmss)
+        sessionDirs.sort((a, b) => b.localeCompare(a))
+
+        for (const dir of sessionDirs) {
+          const imgs = await scanImages(path.join(explorationBase, dir), `res://assets/.art_exploration/${dir}`)
+          if (imgs.length > 0) {
+            sessions.push({ id: dir, images: imgs })
+          }
+        }
+
+        // Legacy loose files → "default" session at the end
+        if (looseImages.length > 0) {
+          sessions.push({ id: "default", images: looseImages })
+        }
+      } catch {
+        // .art_exploration doesn't exist yet
+      }
+
+      const cornerstone = await scanCornerstone(
+        path.join(projectRoot, "assets", "cornerstone"),
+        "res://assets/cornerstone",
+      )
+
+      return c.json({ sessions, cornerstone })
     })
 
     // GET list available image generation models
