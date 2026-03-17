@@ -1,5 +1,6 @@
 import { Log } from "../../util/log"
 import { Config } from "../../config/config"
+import { Auth } from "../../auth"
 import { AssetProvider } from "./asset-provider"
 import { MeshyProvider } from "./meshy"
 import { DoubaoProvider } from "./doubao"
@@ -73,39 +74,57 @@ export namespace AssetProviderRegistry {
       | Record<string, AssetProvider.ProviderConfig>
       | undefined
 
-    if (!assetConfig) {
-      log.info("no asset_provider config found, skipping provider init")
-      return
+    if (assetConfig) {
+      for (const [providerId, providerConfig] of Object.entries(assetConfig)) {
+        if (providerConfig.enabled === false) {
+          log.info("asset provider disabled", { id: providerId })
+          continue
+        }
+
+        const factory = BUILTIN_FACTORIES[providerId]
+        if (!factory) {
+          log.warn("unknown asset provider", { id: providerId })
+          continue
+        }
+
+        // Resolve API key: config > env var > auth.json
+        let apiKey = providerConfig.api_key
+          ?? (providerConfig.api_key_env ? process.env[providerConfig.api_key_env] : undefined)
+        if (!apiKey) {
+          const authInfo = await Auth.get(providerId)
+          if (authInfo?.type === "api") {
+            apiKey = authInfo.key
+          }
+        }
+        if (!apiKey) {
+          log.warn("asset provider missing API key", {
+            id: providerId,
+            env: providerConfig.api_key_env ?? "(not configured)",
+          })
+          continue
+        }
+
+        const provider = factory({
+          apiKey,
+          apiUrl: providerConfig.api_url,
+        })
+
+        register(provider)
+      }
     }
 
-    for (const [providerId, providerConfig] of Object.entries(assetConfig)) {
-      if (providerConfig.enabled === false) {
-        log.info("asset provider disabled", { id: providerId })
-        continue
-      }
+    // Auto-discover: register any provider that has a key in auth.json
+    // and a built-in factory, even without explicit config
+    const allAuth = await Auth.all()
+    for (const [providerId, authInfo] of Object.entries(allAuth)) {
+      if (providers.has(providerId)) continue // Already registered from config
+      if (authInfo.type !== "api") continue
 
       const factory = BUILTIN_FACTORIES[providerId]
-      if (!factory) {
-        log.warn("unknown asset provider", { id: providerId })
-        continue
-      }
+      if (!factory) continue
 
-      // Resolve API key: direct key takes precedence over env var
-      const apiKey = providerConfig.api_key
-        ?? (providerConfig.api_key_env ? process.env[providerConfig.api_key_env] : undefined)
-      if (!apiKey) {
-        log.warn("asset provider missing API key", {
-          id: providerId,
-          env: providerConfig.api_key_env ?? "(not configured)",
-        })
-        continue
-      }
-
-      const provider = factory({
-        apiKey,
-        apiUrl: providerConfig.api_url,
-      })
-
+      log.info("auto-registering asset provider from auth.json", { id: providerId })
+      const provider = factory({ apiKey: authInfo.key })
       register(provider)
     }
 

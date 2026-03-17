@@ -35,13 +35,13 @@ export class ReplicateProvider implements AssetProvider.Provider {
   private bundleCache = new Map<string, AssetProvider.AssetBundle>()
 
   /** Models that use aspect_ratio instead of width/height */
-  private static readonly ASPECT_RATIO_MODELS = new Set(["sd-3.5-medium", "sd-3.5-large-turbo", "flux-2-pro", "nano-banana-2"])
+  private static readonly ASPECT_RATIO_MODELS = new Set(["sd-3.5-medium", "sd-3.5-large-turbo", "flux-2-pro", "nano-banana-2", "nano-banana-pro"])
 
   /** Models that use cfg instead of guidance_scale */
   private static readonly CFG_MODELS = new Set(["sd-3.5-medium", "sd-3.5-large-turbo"])
 
   /** Models that do NOT support negative_prompt */
-  private static readonly NO_NEGATIVE_PROMPT = new Set(["flux-2-pro", "nano-banana-2"])
+  private static readonly NO_NEGATIVE_PROMPT = new Set(["flux-2-pro", "nano-banana-2", "nano-banana-pro"])
 
   /** FLUX.2 models — use output_quality parameter, quality auto (no go_fast) */
   private static readonly FLUX2_MODELS = new Set(["flux-2-pro"])
@@ -61,6 +61,11 @@ export class ReplicateProvider implements AssetProvider.Provider {
       ref: "google/nano-banana-2",
       description: "Nano Banana 2 (Gemini 3.1 Flash Image) — fast, pro-level quality, text rendering, image editing",
       cost: 0.067,
+    },
+    "nano-banana-pro": {
+      ref: "google/nano-banana-pro",
+      description: "Nano Banana Pro (Gemini 3.1 Pro Image) — highest quality, slower, best for final assets",
+      cost: 0.10,
     },
     "sd-3.5-medium": {
       ref: "stability-ai/stable-diffusion-3.5-medium",
@@ -154,7 +159,7 @@ export class ReplicateProvider implements AssetProvider.Provider {
     // For FLUX.2 Pro and Nano Banana 2: load reference image if provided
     let effectivePrompt = request.prompt
     let inputImageDataUrl: string | undefined
-    const supportsInputImage = ReplicateProvider.FLUX2_MODELS.has(modelId) || modelId === "nano-banana-2"
+    const supportsInputImage = ReplicateProvider.FLUX2_MODELS.has(modelId) || modelId === "nano-banana-2" || modelId === "nano-banana-pro"
 
     if (supportsInputImage && request.parameters.input_image) {
       const inputImagePath = String(request.parameters.input_image)
@@ -183,7 +188,7 @@ export class ReplicateProvider implements AssetProvider.Provider {
     }
 
     // Nano Banana 2: enable image search for better results
-    if (modelId === "nano-banana-2") {
+    if (modelId === "nano-banana-2" || modelId === "nano-banana-pro") {
       input.image_search = true
     }
 
@@ -429,7 +434,7 @@ export class ReplicateProvider implements AssetProvider.Provider {
 
   /** Pick the closest valid aspect ratio from width/height for a given model */
   private static findClosestAspectRatio(w: number, h: number, modelId: string): string {
-    const ratios = (ReplicateProvider.FLUX2_MODELS.has(modelId) || modelId === "nano-banana-2")
+    const ratios = (ReplicateProvider.FLUX2_MODELS.has(modelId) || modelId === "nano-banana-2" || modelId === "nano-banana-pro")
       ? ReplicateProvider.FLUX_RATIOS
       : ReplicateProvider.SD35_RATIOS
     const target = w / h

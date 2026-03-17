@@ -3,12 +3,17 @@ import { xdgData, xdgCache, xdgConfig, xdgState } from "xdg-basedir"
 import path from "path"
 import os from "os"
 
-const app = "opencode"
+const app = "redblue"
 
-const data = path.join(xdgData!, app)
-const cache = path.join(xdgCache!, app)
-const config = path.join(xdgConfig!, app)
-const state = path.join(xdgState!, app)
+// On Windows, use %LOCALAPPDATA% (e.g. C:\Users\X\AppData\Local\redblue\)
+// instead of ~/.local/share which is a Unix convention.
+const localAppData = process.platform === "win32" ? process.env.LOCALAPPDATA : undefined
+const winBase = localAppData ? path.join(localAppData, app) : undefined
+
+const data = winBase ? path.join(winBase, "data") : path.join(xdgData!, app)
+const cache = winBase ? path.join(winBase, "cache") : path.join(xdgCache!, app)
+const config = winBase ? path.join(winBase, "config") : path.join(xdgConfig!, app)
+const state = winBase ? path.join(winBase, "state") : path.join(xdgState!, app)
 
 export namespace Global {
   export const Path = {

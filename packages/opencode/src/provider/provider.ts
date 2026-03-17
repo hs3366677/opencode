@@ -808,19 +808,7 @@ export namespace Provider {
       database[providerID] = parsed
     }
 
-    // load env
-    const env = Env.all()
-    for (const [providerID, provider] of Object.entries(database)) {
-      if (disabled.has(providerID)) continue
-      const apiKey = provider.env.map((item) => env[item]).find(Boolean)
-      if (!apiKey) continue
-      mergeProvider(providerID, {
-        source: "env",
-        key: provider.env.length === 1 ? apiKey : undefined,
-      })
-    }
-
-    // load apikeys
+    // load apikeys from auth.json
     for (const [providerID, provider] of Object.entries(await Auth.all())) {
       if (disabled.has(providerID)) continue
       if (provider.type === "api") {
@@ -956,6 +944,10 @@ export namespace Provider {
     return state().then((state) => state.providers)
   }
 
+  export function reset() {
+    state.reset()
+  }
+
   async function getSDK(model: Model) {
     try {
       using _ = log.time("getSDK", {
@@ -970,7 +962,36 @@ export namespace Provider {
       }
 
       if (!options["baseURL"]) options["baseURL"] = model.api.url
-      if (options["apiKey"] === undefined && provider.key) options["apiKey"] = provider.key
+      if (options["apiKey"] === undefined && provider.key) {
+        // Anthropic OAuth tokens (sk-ant-oat01-) must use Authorization: Bearer, not x-api-key
+        if (provider.key.startsWith("sk-ant-oat01-")) {
+          const oauthToken = provider.key
+          options["apiKey"] = ""
+          const existingFetch = options["fetch"]
+          options["fetch"] = async (input: any, init?: any) => {
+            const headers = new Headers(init?.headers)
+            headers.set("authorization", `Bearer ${oauthToken}`)
+            headers.set("anthropic-beta", [
+              "oauth-2025-04-20",
+              ...((headers.get("anthropic-beta") || "").split(",").map((b: string) => b.trim()).filter(Boolean)),
+            ].join(","))
+            headers.delete("x-api-key")
+            // Add ?beta=true for /v1/messages
+            let requestInput = input
+            try {
+              const url = new URL(typeof input === "string" ? input : input instanceof Request ? input.url : input.toString())
+              if (url.pathname === "/v1/messages" && !url.searchParams.has("beta")) {
+                url.searchParams.set("beta", "true")
+                requestInput = input instanceof Request ? new Request(url.toString(), input) : url
+              }
+            } catch {}
+            const fetchFn = existingFetch ?? fetch
+            return fetchFn(requestInput, { ...init, headers })
+          }
+        } else {
+          options["apiKey"] = provider.key
+        }
+      }
       if (model.headers)
         options["headers"] = {
           ...options["headers"],

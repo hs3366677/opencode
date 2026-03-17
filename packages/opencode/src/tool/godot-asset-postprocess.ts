@@ -4,6 +4,8 @@ import fs from "fs/promises"
 import { Tool } from "./tool"
 import { Instance } from "../project/instance"
 import { AssetMetadata } from "../provider/asset/metadata"
+import { Auth } from "../auth"
+import { getRemoveBgMethod } from "../server/routes/ai-assets"
 
 // =============================================================================
 // Helpers
@@ -204,15 +206,13 @@ Examples:
 })
 
 // =============================================================================
-// godot_asset_remove_bg — Background removal via PhotoRoom API
+// godot_asset_remove_bg — Background removal via Replicate (bria/remove-background) or local RMBG-2.0
 // =============================================================================
 
 export const GodotAssetRemoveBgTool = Tool.define("godot_asset_remove_bg", {
-  description: `Remove the background from an image using the PhotoRoom API.
+  description: `Remove the background from an image.
 Works on any background — complex scenes, gradients, photos — not just solid colors.
-Automatically crops to the subject. Output is always PNG (to preserve transparency).
-
-Requires PHOTOROOM_API_KEY in .env.keys.`,
+Output is always PNG (to preserve transparency).`,
   parameters: z.object({
     asset_path: z.string().describe("res:// path to the image file"),
   }),
@@ -230,40 +230,77 @@ Requires PHOTOROOM_API_KEY in .env.keys.`,
       }
     }
 
-    const photoRoomKey = process.env.PHOTOROOM_API_KEY
-    if (!photoRoomKey) {
-      return {
-        title: "Remove BG failed",
-        metadata: { error: "missing_api_key" },
-        output: `Error: PHOTOROOM_API_KEY not set — add it to your .env.keys file (see .env.keys.example)`,
-      }
-    }
-
     // Save version before modifying
     await AssetMetadata.saveVersion(absPath)
 
     const inputBuffer = await fs.readFile(absPath)
+    let resultBuffer: Buffer
+    let provider: string
 
-    const formData = new FormData()
-    formData.append("image_file", new Blob([new Uint8Array(inputBuffer)], { type: "image/png" }), "image.png")
-    formData.append("crop", "true")
+    const removeBgMethod = await getRemoveBgMethod()
+    const replicateAuth = await Auth.get("replicate")
+    const replicateKey = replicateAuth?.type === "api" ? replicateAuth.key : undefined
 
-    const response = await fetch("https://sdk.photoroom.com/v1/segment", {
-      method: "POST",
-      headers: { "x-api-key": photoRoomKey },
-      body: formData,
-    })
-
-    if (!response.ok) {
-      const errText = await response.text()
-      return {
-        title: "Remove BG failed",
-        metadata: { error: `PhotoRoom API ${response.status}` },
-        output: `Error: PhotoRoom API failed (${response.status}): ${errText}`,
+    if (removeBgMethod === "replicate" && replicateKey) {
+      // Replicate bria/remove-background (cloud)
+      try {
+        const Replicate = (await import("replicate")).default
+        const client = new Replicate({ auth: replicateKey })
+        const dataUrl = `data:image/png;base64,${inputBuffer.toString("base64")}`
+        const output = await client.run("bria-ai/rmbg-2.0", { input: { image: dataUrl } })
+        // Output is a ReadableStream or URL string
+        let outputUrl: string
+        if (typeof output === "string") {
+          outputUrl = output
+        } else if (output && typeof output === "object" && "url" in (output as any)) {
+          outputUrl = String((output as any).url())
+        } else {
+          outputUrl = String(output)
+        }
+        const dlResponse = await fetch(outputUrl)
+        if (!dlResponse.ok) {
+          return {
+            title: "Remove BG failed",
+            metadata: { error: `Replicate download ${dlResponse.status}` },
+            output: `Error: Failed to download result from Replicate (${dlResponse.status})`,
+          }
+        }
+        resultBuffer = Buffer.from(await dlResponse.arrayBuffer())
+        provider = "replicate"
+      } catch (e: any) {
+        return {
+          title: "Remove BG failed",
+          metadata: { error: `Replicate API: ${e?.message}` },
+          output: `Error: Replicate background removal failed: ${e?.message ?? e}`,
+        }
+      }
+    } else {
+      // Local RMBG-2.0 sidecar (default, or fallback when no Replicate key)
+      try {
+        const response = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+          method: "POST",
+          headers: { "Content-Type": "image/png" },
+          body: new Uint8Array(inputBuffer),
+          signal: AbortSignal.timeout(120_000),
+        })
+        if (!response.ok) {
+          const errText = await response.text()
+          return {
+            title: "Remove BG failed",
+            metadata: { error: `RMBG service ${response.status}` },
+            output: `Error: RMBG service failed (${response.status}): ${errText}`,
+          }
+        }
+        resultBuffer = Buffer.from(await response.arrayBuffer())
+        provider = "rmbg-2.0"
+      } catch (e: any) {
+        return {
+          title: "Remove BG failed",
+          metadata: { error: "no_provider" },
+          output: `Error: No background removal service available. Ensure the RMBG-2.0 Python service is running, or configure a Replicate API key.`,
+        }
       }
     }
-
-    const resultBuffer = Buffer.from(await response.arrayBuffer())
 
     // Ensure output is PNG (for transparency)
     let outputPath = absPath
@@ -279,8 +316,8 @@ Requires PHOTOROOM_API_KEY in .env.keys.`,
     if (existingMeta) {
       const postProcessing = existingMeta.post_processing ?? []
       postProcessing.push({
-        operation: "remove_bg+crop",
-        params: { provider: "photoroom" },
+        operation: "remove_bg",
+        params: { provider },
         timestamp: new Date().toISOString(),
       })
       await AssetMetadata.update(absPath, { post_processing: postProcessing } as any)
@@ -297,7 +334,7 @@ Requires PHOTOROOM_API_KEY in .env.keys.`,
         output_path: outputPath !== absPath ? outputPath : undefined,
         dimensions: `${meta.width}x${meta.height}`,
       },
-      output: `Background removed from ${params.asset_path} (PhotoRoom + crop).\nResult: ${meta.width}x${meta.height} PNG${outputPath !== absPath ? `\nSaved to: ${outputPath}` : ""}`,
+      output: `Background removed from ${params.asset_path} (${provider}).\nResult: ${meta.width}x${meta.height} PNG${outputPath !== absPath ? `\nSaved to: ${outputPath}` : ""}`,
     }
   },
 })

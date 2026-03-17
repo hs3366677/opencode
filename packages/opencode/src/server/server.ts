@@ -43,6 +43,7 @@ import { AIAssetRoutes } from "./routes/ai-assets"
 import { GodotRoutes } from "./routes/godot"
 import { AssetProviderRegistry } from "../provider/asset"
 import { MDNS } from "./mdns"
+import path from "path"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -51,6 +52,71 @@ export namespace Server {
   const log = Log.create({ service: "server" })
 
   let _url: URL | undefined
+  let _rmbgProcess: ReturnType<typeof Bun.spawn> | undefined
+  let _rmbgReady = false
+
+  export function rmbgAvailable(): boolean {
+    return _rmbgReady
+  }
+
+  async function spawnRmbgSidecar() {
+    const rmbgDir = path.resolve(import.meta.dir, "../../services/rmbg")
+    const mainPy = path.join(rmbgDir, "main.py")
+
+    // Check if the service script exists
+    if (!(await Bun.file(mainPy).exists())) {
+      log.warn("RMBG service script not found, skipping", { path: mainPy })
+      return
+    }
+
+    // Check if Python is available
+    try {
+      const pythonCheck = Bun.spawn(["python", "--version"], { stdout: "pipe", stderr: "pipe" })
+      await pythonCheck.exited
+      if (pythonCheck.exitCode !== 0) throw new Error("python not found")
+    } catch {
+      log.warn("Python not available, RMBG sidecar will not start. Background removal will require PhotoRoom API key.")
+      return
+    }
+
+    const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+    log.info("Starting RMBG-2.0 sidecar service...", { port: rmbgPort })
+
+    _rmbgProcess = Bun.spawn(["python", "main.py"], {
+      cwd: rmbgDir,
+      env: { ...process.env, MAKABAKA_RMBG_PORT: rmbgPort },
+      stdout: "inherit",
+      stderr: "inherit",
+    })
+
+    // Health check loop (background, non-blocking)
+    const maxAttempts = 30
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000))
+      try {
+        const resp = await fetch(`http://127.0.0.1:${rmbgPort}/health`, {
+          signal: AbortSignal.timeout(2000),
+        })
+        if (resp.ok) {
+          _rmbgReady = true
+          log.info("RMBG-2.0 sidecar is ready")
+          return
+        }
+      } catch {
+        // Not ready yet
+      }
+    }
+    log.warn("RMBG-2.0 sidecar failed to start within 60s")
+  }
+
+  function killRmbgSidecar() {
+    if (_rmbgProcess) {
+      _rmbgProcess.kill()
+      _rmbgProcess = undefined
+      _rmbgReady = false
+      log.info("RMBG-2.0 sidecar stopped")
+    }
+  }
   let _corsWhitelist: string[] = []
 
   export function url(): URL {
@@ -591,6 +657,11 @@ export namespace Server {
       log.warn("failed to init asset providers", { error: e })
     )
 
+    // Start RMBG-2.0 sidecar (non-blocking)
+    spawnRmbgSidecar().catch((e) =>
+      log.warn("failed to start RMBG sidecar", { error: e })
+    )
+
     const shouldPublishMDNS =
       opts.mdns &&
       server.port &&
@@ -605,6 +676,7 @@ export namespace Server {
 
     const originalStop = server.stop.bind(server)
     server.stop = async (closeActiveConnections?: boolean) => {
+      killRmbgSidecar()
       if (shouldPublishMDNS) MDNS.unpublish()
       return originalStop(closeActiveConnections)
     }
