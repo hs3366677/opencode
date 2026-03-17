@@ -1,13 +1,62 @@
 import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
-import { Config } from "../../config/config"
 import { Provider } from "../../provider/provider"
 import { ModelsDev } from "../../provider/models"
 import { ProviderAuth } from "../../provider/auth"
+import { Auth } from "../../auth"
 import { mapValues } from "remeda"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
+import { AssetProviderRegistry } from "../../provider/asset"
+import capabilitiesJson from "./provider_capabilities.json"
+
+// Provider capability definitions
+// Each provider has: display name, services it offers, and optional API validation info
+export interface ProviderCapability {
+  name: string
+  services: ("chat" | "image-generation" | "background-removal" | "3d-generation" | "music-generation" | "atlas-split" | "image-postprocess" | "gif-recording")[]
+  api?: { url: string; authType?: "anthropic" | "bearer" | "query" }
+  keyPrefix?: string // Expected key prefix for display hint (e.g. "r8_", "sk-")
+  local?: boolean // True for local services (no API key needed, use health check instead)
+  healthCheck?: string // URL path for health check (e.g. "/ai-assets/rmbg-health")
+}
+
+export const PROVIDER_CAPABILITIES: Record<string, ProviderCapability> = capabilitiesJson as Record<string, ProviderCapability>
+
+async function validateProviderKey(providerID: string, apiKey: string): Promise<boolean> {
+  const cap = PROVIDER_CAPABILITIES[providerID]
+  if (!cap?.api) {
+    // No API URL to validate against — cannot verify
+    return false
+  }
+
+  const baseUrl = cap.api.url.replace(/\/+$/, "")
+
+  // Build headers based on auth type
+  const headers: Record<string, string> =
+    cap.api.authType === "anthropic"
+      ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
+      : cap.api.authType === "query"
+        ? {}
+        : { Authorization: `Bearer ${apiKey}` }
+
+  let modelsUrl = `${baseUrl}/models`
+  if (cap.api.authType === "query") {
+    modelsUrl += `?key=${apiKey}`
+  }
+
+  try {
+    const resp = await fetch(modelsUrl, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(10000),
+    })
+    return resp.status >= 200 && resp.status < 400
+  } catch {
+    return false
+  }
+}
 
 export const ProviderRoutes = lazy(() =>
   new Hono()
@@ -35,27 +84,20 @@ export const ProviderRoutes = lazy(() =>
         },
       }),
       async (c) => {
-        const config = await Config.get()
-        const disabled = new Set(config.disabled_providers ?? [])
-        const enabled = config.enabled_providers ? new Set(config.enabled_providers) : undefined
+        const connected = await Provider.list()
 
-        const allProviders = await ModelsDev.get()
-        const filteredProviders: Record<string, (typeof allProviders)[string]> = {}
-        for (const [key, value] of Object.entries(allProviders)) {
-          if ((enabled ? enabled.has(key) : true) && !disabled.has(key)) {
-            filteredProviders[key] = value
-          }
+        // Build connected set: LLM providers + all providers with keys in auth.json
+        const connectedKeys = new Set(Object.keys(connected))
+        const allAuth = await Auth.all()
+        for (const providerID of Object.keys(allAuth)) {
+          connectedKeys.add(providerID)
         }
 
-        const connected = await Provider.list()
-        const providers = Object.assign(
-          mapValues(filteredProviders, (x) => Provider.fromModelsDevProvider(x)),
-          connected,
-        )
         return c.json({
-          all: Object.values(providers),
-          default: mapValues(providers, (item) => Provider.sort(Object.values(item.models))[0].id),
-          connected: Object.keys(connected),
+          all: Object.values(connected),
+          default: mapValues(connected, (item) => Provider.sort(Object.values(item.models))[0].id),
+          connected: [...connectedKeys],
+          capabilities: PROVIDER_CAPABILITIES,
         })
       },
     )
@@ -78,6 +120,65 @@ export const ProviderRoutes = lazy(() =>
       }),
       async (c) => {
         return c.json(await ProviderAuth.methods())
+      },
+    )
+    .post(
+      "/:providerID/api-key",
+      describeRoute({
+        summary: "Set API key",
+        description: "Set an API key for a specific AI provider.",
+        operationId: "provider.apiKey",
+        responses: {
+          200: {
+            description: "API key saved",
+            content: {
+              "application/json": {
+                schema: resolver(z.boolean()),
+              },
+            },
+          },
+          ...errors(400),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          providerID: z.string().meta({ description: "Provider ID" }),
+        }),
+      ),
+      validator(
+        "json",
+        z.object({
+          apiKey: z.string().meta({ description: "API key" }),
+        }),
+      ),
+      async (c) => {
+        const providerID = c.req.valid("param").providerID
+        const { apiKey } = c.req.valid("json")
+
+        const cap = PROVIDER_CAPABILITIES[providerID]
+        const hasChat = cap?.services.includes("chat")
+
+        // Non-chat providers (image gen, 3D, music, etc.) — save key without LLM validation
+        if (cap && !hasChat) {
+          await ProviderAuth.api({ providerID, key: apiKey })
+          // Also register in asset provider registry so it's available immediately
+          await AssetProviderRegistry.configureProvider(providerID, apiKey).catch(() => {})
+          return c.json(true)
+        }
+
+        // Anthropic OAuth tokens (sk-ant-oat01-) are validated by the auth plugin, skip HTTP check
+        const isOauthToken = apiKey.startsWith("sk-ant-oat01-")
+        if (!isOauthToken) {
+          const valid = await validateProviderKey(providerID, apiKey)
+          if (!valid) {
+            return c.json({ error: "Invalid API key - verification failed" }, 401)
+          }
+        }
+
+        await ProviderAuth.api({ providerID, key: apiKey })
+        Provider.reset()
+        return c.json(true)
       },
     )
     .post(

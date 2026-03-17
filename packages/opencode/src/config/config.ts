@@ -1060,6 +1060,13 @@ export namespace Config {
           prune: z.boolean().optional().describe("Enable pruning of old tool outputs (default: true)"),
         })
         .optional(),
+      services: z
+        .object({
+          image_model: z.string().optional().describe("Image generation model ID (e.g. 'nano-banana-2', 'nano-banana-pro')"),
+          removebg_method: z.enum(["replicate", "local"]).optional().describe("Background removal method: 'replicate' for Replicate bria/rmbg-2.0, 'local' for RMBG-2.0 sidecar"),
+        })
+        .optional()
+        .describe("Service settings for asset pipeline (removebg, etc.)"),
       experimental: z
         .object({
           hook: z

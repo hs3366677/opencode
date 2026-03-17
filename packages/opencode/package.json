@@ -74,7 +74,6 @@
     "@hono/standard-validator": "0.1.5",
     "@hono/zod-validator": "catalog:",
     "@img/sharp-win32-x64": "0.34.5",
-    "@imgly/background-removal-node": "^1.4.5",
     "@modelcontextprotocol/sdk": "1.25.2",
     "@octokit/graphql": "9.0.2",
     "@octokit/rest": "catalog:",

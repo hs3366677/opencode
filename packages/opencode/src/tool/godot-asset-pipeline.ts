@@ -9,7 +9,8 @@ import { generateImage } from "../provider/asset/generate-image"
 import { readProfile } from "../provider/asset/style-profile"
 import { Identifier } from "../id/id"
 import type { MessageV2 } from "../session/message-v2"
-import { getModelDefaults } from "../config/model-defaults"
+import { Auth } from "../auth"
+import { getRemoveBgMethod, getImageModel } from "../server/routes/ai-assets"
 
 // =============================================================================
 // Helpers
@@ -124,7 +125,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
     }
 
     let effectivePrompt = generationPrompt
-    let effectiveModel = params.model ?? getModelDefaults().image_generation
+    let effectiveModel = params.model ?? await getImageModel()
     let effectiveParameters: Record<string, unknown> = {}
     let refImageAbsPath: string | undefined
 
@@ -221,26 +222,81 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
 
     ctx.metadata({ title: `Pipeline: post-processing (attempt ${params.attempt}/${params.max_retries})...` })
 
-    // 3a. Remove background → transparent (via PhotoRoom API)
+    // 3a. Remove background → transparent
+    // Method is determined by user config: "replicate" uses Replicate bria/rmbg-2.0, "local" uses RMBG-2.0 sidecar
     if (transparent_bg) {
-      const photoRoomKey = process.env.PHOTOROOM_API_KEY
-      if (!photoRoomKey) {
-        throw new Error("PHOTOROOM_API_KEY not set — add it to your .env.keys file (see .env.keys.example)")
+      const removeBgMethod = await getRemoveBgMethod()
+      const replicateAuth = await Auth.get("replicate")
+      const replicateKey = replicateAuth?.type === "api" ? replicateAuth.key : undefined
+
+      if (removeBgMethod === "replicate" && replicateKey) {
+        // Replicate bria/remove-background (cloud)
+        try {
+          const Replicate = (await import("replicate")).default
+          const client = new Replicate({ auth: replicateKey })
+          const dataUrl = `data:image/png;base64,${imageBuffer.toString("base64")}`
+          const output = await client.run("bria-ai/rmbg-2.0", { input: { image: dataUrl } })
+          let outputUrl: string
+          if (typeof output === "string") {
+            outputUrl = output
+          } else if (output && typeof output === "object" && "url" in (output as any)) {
+            outputUrl = String((output as any).url())
+          } else {
+            outputUrl = String(output)
+          }
+          const dlResponse = await fetch(outputUrl)
+          if (!dlResponse.ok) {
+            throw new Error(`Failed to download result from Replicate (${dlResponse.status})`)
+          }
+          imageBuffer = Buffer.from(await dlResponse.arrayBuffer())
+          postProcessingLog.push(shouldCrop ? "remove_bg+crop(replicate)" : "remove_bg(replicate)")
+        } catch (e: any) {
+          console.warn(`[pipeline] Replicate background removal failed, trying local: ${e?.message ?? e}`)
+          // Fall back to local RMBG
+          try {
+            const rmbgResponse = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+              method: "POST",
+              headers: { "Content-Type": "image/png" },
+              body: new Uint8Array(imageBuffer),
+              signal: AbortSignal.timeout(120_000),
+            })
+            if (!rmbgResponse.ok) {
+              throw new Error(`RMBG service returned ${rmbgResponse.status}`)
+            }
+            imageBuffer = Buffer.from(await rmbgResponse.arrayBuffer())
+            postProcessingLog.push("remove_bg(rmbg-2.0-fallback)")
+          } catch (e2: any) {
+            console.warn(`[pipeline] Background removal skipped: ${e2?.message ?? e2}`)
+            postProcessingLog.push("remove_bg(skipped)")
+          }
+        }
+      } else {
+        // Local RMBG-2.0 sidecar (default, or fallback when no Replicate key)
+        try {
+          const rmbgResponse = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+            method: "POST",
+            headers: { "Content-Type": "image/png" },
+            body: new Uint8Array(imageBuffer),
+            signal: AbortSignal.timeout(120_000),
+          })
+          if (!rmbgResponse.ok) {
+            throw new Error(`RMBG service returned ${rmbgResponse.status}`)
+          }
+          imageBuffer = Buffer.from(await rmbgResponse.arrayBuffer())
+          postProcessingLog.push("remove_bg(rmbg-2.0)")
+        } catch (e: any) {
+          console.warn(`[pipeline] Background removal skipped: ${e?.message ?? e}`)
+          postProcessingLog.push("remove_bg(skipped)")
+        }
       }
-      const formData = new FormData()
-      formData.append("image_file", new Blob([new Uint8Array(imageBuffer)], { type: "image/png" }), "image.png")
-      formData.append("crop", shouldCrop ? "true" : "false")
-      const rbgResponse = await fetch("https://sdk.photoroom.com/v1/segment", {
-        method: "POST",
-        headers: { "x-api-key": photoRoomKey },
-        body: formData,
-      })
-      if (!rbgResponse.ok) {
-        const errText = await rbgResponse.text()
-        throw new Error(`PhotoRoom API failed (${rbgResponse.status}): ${errText}`)
-      }
-      imageBuffer = Buffer.from(await rbgResponse.arrayBuffer())
-      postProcessingLog.push(shouldCrop ? "remove_bg+crop(photoroom)" : "remove_bg(photoroom)")
+    }
+
+    // 3b. Trim transparent pixels
+    {
+      const trimmed = sharp(imageBuffer).trim()
+      const trimInfo = await trimmed.toBuffer({ resolveWithObject: true })
+      imageBuffer = trimInfo.data
+      postProcessingLog.push("trim")
     }
 
     // 3c. Resize to fit within target dimensions (keep aspect ratio)

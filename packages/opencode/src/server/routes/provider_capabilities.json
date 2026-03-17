@@ -1,0 +1,73 @@
+{
+  "anthropic": {
+    "name": "Anthropic",
+    "services": ["chat"],
+    "api": { "url": "https://api.anthropic.com/v1", "authType": "anthropic" },
+    "keyPrefix": "sk-ant-"
+  },
+  "openai": {
+    "name": "OpenAI",
+    "services": ["chat", "image-generation"],
+    "api": { "url": "https://api.openai.com/v1", "authType": "bearer" },
+    "keyPrefix": "sk-"
+  },
+  "google": {
+    "name": "Google",
+    "services": ["chat"],
+    "api": { "url": "https://generativelanguage.googleapis.com/v1beta", "authType": "query" }
+  },
+  "openrouter": {
+    "name": "OpenRouter",
+    "services": ["chat"],
+    "api": { "url": "https://openrouter.ai/api/v1", "authType": "bearer" },
+    "keyPrefix": "sk-or-"
+  },
+  "replicate": {
+    "name": "Replicate",
+    "services": ["image-generation", "background-removal"],
+    "api": { "url": "https://api.replicate.com/v1", "authType": "bearer" },
+    "keyPrefix": "r8_"
+  },
+  "photoroom": {
+    "name": "PhotoRoom",
+    "services": ["background-removal"],
+    "keyPrefix": "sk_pr_"
+  },
+  "meshy": {
+    "name": "Meshy",
+    "services": ["3d-generation"],
+    "keyPrefix": "msy_"
+  },
+  "suno": {
+    "name": "Suno",
+    "services": ["music-generation"]
+  },
+  "doubao": {
+    "name": "Doubao",
+    "services": ["chat", "image-generation"]
+  },
+  "local_rmbg": {
+    "name": "RMBG-2.0",
+    "services": ["background-removal"],
+    "local": true,
+    "healthCheck": "/ai-assets/rmbg-health"
+  },
+  "local_atlas_split": {
+    "name": "Atlas Splitter",
+    "services": ["atlas-split"],
+    "local": true,
+    "healthCheck": "/ai-assets/atlas-split-health"
+  },
+  "local_sharp": {
+    "name": "Sharp",
+    "services": ["image-postprocess"],
+    "local": true,
+    "healthCheck": "/ai-assets/sharp-health"
+  },
+  "local_gifenc": {
+    "name": "GIFenc",
+    "services": ["gif-recording"],
+    "local": true,
+    "healthCheck": "/ai-assets/gifenc-health"
+  }
+}

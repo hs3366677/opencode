@@ -9,6 +9,7 @@ import type { AssetProvider } from "../provider/asset/asset-provider"
 import { readProfile, writeProfile } from "../provider/asset/style-profile"
 import type { StyleProfile } from "../provider/asset/style-profile"
 import { getModelDefaults } from "../config/model-defaults"
+import { getImageModel } from "../server/routes/ai-assets"
 import { generateImage } from "../provider/asset/generate-image"
 import { GodotAssetPipelineTool } from "./godot-asset-pipeline"
 
@@ -279,7 +280,7 @@ export const GodotAssetCreatePlaceholderTool = Tool.define("godot_asset_create_p
       prompt: params.prompt,
       negative_prompt: params.negative_prompt,
       provider: resolved?.provider.id ?? params.provider,
-      model: resolved?.modelId ?? params.model ?? getModelDefaults().image_generation,
+      model: resolved?.modelId ?? params.model ?? await getImageModel(),
       parameters: params.parameters,
       usage: params.usage,
       created_at: new Date().toISOString(),
@@ -838,7 +839,7 @@ export const GodotArtExploreTool = Tool.define("godot_art_explore", {
         const result = await generateImage({
           type: "texture",
           prompt,
-          model: params.model ?? getModelDefaults().art_explore,
+          model: params.model ?? await getImageModel(),
           parameters: {
             aspect_ratio: params.aspect_ratio,
             ...(params.reference_image ? { input_image: params.reference_image } : {}),
@@ -908,7 +909,7 @@ export const GodotArtRefineTool = Tool.define("godot_art_refine", {
         destination: refResPath,
         asset_type: "texture",
         requirements: { match_size: false, min_score: 7 },
-        model: params.model ?? getModelDefaults().art_explore,
+        model: params.model ?? await getImageModel(),
         reference_image: refResPath,
         prompt_strength: params.strength,
         use_project_style: true,
