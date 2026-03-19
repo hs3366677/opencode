@@ -6,6 +6,7 @@ import { Instance } from "../project/instance"
 import { AssetMetadata } from "../provider/asset/metadata"
 import { Auth } from "../auth"
 import { getRemoveBgMethod } from "../server/routes/ai-assets"
+import { Server } from "../server/server"
 
 // =============================================================================
 // Helpers
@@ -277,7 +278,7 @@ Output is always PNG (to preserve transparency).`,
     } else {
       // Local RMBG-2.0 sidecar (default, or fallback when no Replicate key)
       try {
-        const response = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+        const response = await fetch(`${Server.url().origin}/ai-assets/remove-background`, {
           method: "POST",
           headers: { "Content-Type": "image/png" },
           body: new Uint8Array(inputBuffer),

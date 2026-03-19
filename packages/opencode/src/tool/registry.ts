@@ -38,7 +38,6 @@ import { GodotAssetPostprocessTool, GodotAssetRemoveBgTool } from "./godot-asset
 import { GodotAssetPipelineTool } from "./godot-asset-pipeline"
 import { GodotAtlasSplitTool } from "./godot-atlas-split"
 import { GodotUIMeasureTool } from "./godot-ui-measure"
-import { GodotLocalProviderInstallTool } from "./godot-local-provider"
 import {
   GodotAssetCreatePlaceholderTool,
   GodotAssetTransformTool,
@@ -176,8 +175,6 @@ export namespace ToolRegistry {
       // Godot Game Creation tools
       GodotGameDesignTool,
       GodotCreationProgressTool,
-      // Godot Local Provider installation
-      GodotLocalProviderInstallTool,
       ...custom,
     ]
   }

@@ -11,6 +11,7 @@ import { Identifier } from "../id/id"
 import type { MessageV2 } from "../session/message-v2"
 import { Auth } from "../auth"
 import { getRemoveBgMethod, getImageModel } from "../server/routes/ai-assets"
+import { Server } from "../server/server"
 
 // =============================================================================
 // Helpers
@@ -256,7 +257,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
           console.warn(`[pipeline] Replicate background removal failed, trying local: ${e?.message ?? e}`)
           // Fall back to local RMBG
           try {
-            const rmbgResponse = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+            const rmbgResponse = await fetch(`${Server.url().origin}/ai-assets/remove-background`, {
               method: "POST",
               headers: { "Content-Type": "image/png" },
               body: new Uint8Array(imageBuffer),
@@ -275,7 +276,7 @@ export const GodotAssetPipelineTool = Tool.define("godot_asset_pipeline", {
       } else {
         // Local RMBG-2.0 sidecar (default, or fallback when no Replicate key)
         try {
-          const rmbgResponse = await fetch("http://127.0.0.1:4096/ai-assets/remove-background", {
+          const rmbgResponse = await fetch(`${Server.url().origin}/ai-assets/remove-background`, {
             method: "POST",
             headers: { "Content-Type": "image/png" },
             body: new Uint8Array(imageBuffer),

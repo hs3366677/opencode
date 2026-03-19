@@ -1,6 +1,7 @@
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 import { Log } from "../util/log"
+import { DEFAULT_PORT } from "./port"
 import { describeRoute, generateSpecs, validator, resolver, openAPIRouteHandler } from "hono-openapi"
 import { Hono } from "hono"
 import { cors } from "hono/cors"
@@ -60,33 +61,75 @@ export namespace Server {
   }
 
   async function spawnRmbgSidecar() {
-    const rmbgDir = path.resolve(import.meta.dir, "../../services/rmbg")
+    // Resolve RMBG service dir. Try multiple locations:
+    // 1. Dev mode: import.meta.dir is src/server, so ../../services/rmbg
+    // 2. Compiled binary: next to the exe at <engine-root>/services/rmbg
+    // 3. Workspace root: process.cwd()/opencode/packages/opencode/services/rmbg
+    const workspace = process.env.BLURED_WORKSPACE || process.cwd()
+    const rmbgCandidates = [
+      path.resolve(import.meta.dir, "../../services/rmbg"),
+      path.resolve(workspace, "opencode/packages/opencode/services/rmbg"),
+      path.resolve(process.execPath, "../../services/rmbg"),
+      path.resolve(process.cwd(), "opencode/packages/opencode/services/rmbg"),
+    ]
+    let rmbgDir = rmbgCandidates[0]
+    for (const candidate of rmbgCandidates) {
+      try {
+        require("fs").accessSync(path.join(candidate, "main.py"))
+        rmbgDir = candidate
+        break
+      } catch {}
+    }
     const mainPy = path.join(rmbgDir, "main.py")
 
     // Check if the service script exists
     if (!(await Bun.file(mainPy).exists())) {
+      console.log("[RMBG] Service script not found at " + mainPy + " -- skipping")
       log.warn("RMBG service script not found, skipping", { path: mainPy })
       return
     }
 
-    // Check if Python is available
+    // Check if Python is available and deps are installed.
+    // Use "python" command (not resolved path) because Windows Store Python
+    // stub works through shell but not via direct spawn.
     try {
-      const pythonCheck = Bun.spawn(["python", "--version"], { stdout: "pipe", stderr: "pipe" })
-      await pythonCheck.exited
-      if (pythonCheck.exitCode !== 0) throw new Error("python not found")
+      const { execSync } = await import("child_process")
+      execSync('python -c "import transformers, torch, fastapi"', {
+        encoding: "utf-8",
+        timeout: 15_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      })
     } catch {
-      log.warn("Python not available, RMBG sidecar will not start. Background removal will require PhotoRoom API key.")
+      console.log("[RMBG] Python or dependencies not found -- RMBG-2.0 will not auto-start.")
+      console.log("[RMBG] Install with: bash scripts/install-local-providers.sh --rmbg")
+      log.warn("Python or RMBG deps not available, skipping sidecar")
       return
     }
 
-    const rmbgPort = process.env.MAKABAKA_RMBG_PORT ?? "7860"
+    const rmbgPort = process.env.BLURED_RMBG_PORT ?? "7860"
+    console.log(`[RMBG] Starting RMBG-2.0 sidecar on port ${rmbgPort}...`)
     log.info("Starting RMBG-2.0 sidecar service...", { port: rmbgPort })
 
-    _rmbgProcess = Bun.spawn(["python", "main.py"], {
+    const { spawn } = await import("child_process")
+    const proc = spawn("python", ["main.py"], {
       cwd: rmbgDir,
-      env: { ...process.env, MAKABAKA_RMBG_PORT: rmbgPort },
-      stdout: "inherit",
-      stderr: "inherit",
+      env: { ...process.env, BLURED_RMBG_PORT: rmbgPort },
+      stdio: "inherit",
+      shell: true,
+    })
+    _rmbgProcess = proc as any
+
+    proc.on("error", (err) => {
+      console.log("[RMBG] Failed to start sidecar process: " + err.message)
+      log.warn("RMBG sidecar process error", { error: err.message })
+    })
+
+    proc.on("exit", (code, signal) => {
+      if (code !== 0 && code !== null) {
+        console.log(`[RMBG] Sidecar exited with code ${code}`)
+        log.warn("RMBG sidecar exited", { code, signal })
+      }
+      _rmbgReady = false
     })
 
     // Health check loop (background, non-blocking)
@@ -99,6 +142,7 @@ export namespace Server {
         })
         if (resp.ok) {
           _rmbgReady = true
+          console.log("[RMBG] RMBG-2.0 sidecar is ready")
           log.info("RMBG-2.0 sidecar is ready")
           return
         }
@@ -106,6 +150,7 @@ export namespace Server {
         // Not ready yet
       }
     }
+    console.log("[RMBG] Sidecar failed to become ready within 60s -- check opencode.log for details")
     log.warn("RMBG-2.0 sidecar failed to start within 60s")
   }
 
@@ -120,7 +165,7 @@ export namespace Server {
   let _corsWhitelist: string[] = []
 
   export function url(): URL {
-    return _url ?? new URL("http://localhost:4096")
+    return _url ?? new URL(`http://localhost:${DEFAULT_PORT}`)
   }
 
   const app = new Hono()
@@ -643,12 +688,14 @@ export namespace Server {
     const tryServe = (port: number) => {
       try {
         return Bun.serve({ ...args, port })
-      } catch {
+      } catch (e) {
+        log.error("Bun.serve failed", { port, error: e })
         return undefined
       }
     }
-    const server = opts.port === 0 ? (tryServe(4096) ?? tryServe(0)) : tryServe(opts.port)
-    if (!server) throw new Error(`Failed to start server on port ${opts.port}`)
+    const requestedPort = opts.port === 0 ? DEFAULT_PORT : opts.port
+    const server = tryServe(requestedPort)
+    if (!server) throw new Error(`Failed to start server on port ${requestedPort}. On Windows, Hyper-V may reserve port ranges dynamically. Change BLURED_AI_PORT in .env to a different port.`)
 
     _url = server.url
 

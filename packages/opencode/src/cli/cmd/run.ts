@@ -81,7 +81,7 @@ export const RunCommand = cmd({
       })
       .option("attach", {
         type: "string",
-        describe: "attach to a running opencode server (e.g., http://localhost:4096)",
+        describe: "attach to a running opencode server (e.g., http://localhost:<port>)",
       })
       .option("port", {
         type: "number",

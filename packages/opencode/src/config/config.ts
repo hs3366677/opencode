@@ -1062,7 +1062,7 @@ export namespace Config {
         .optional(),
       services: z
         .object({
-          image_model: z.string().optional().describe("Image generation model ID (e.g. 'nano-banana-2', 'nano-banana-pro')"),
+          image_model: z.string().optional().describe("Image generation model ID in 'provider/model' format (e.g. 'replicate/nano-banana-2', 'replicate/nano-banana-pro')"),
           removebg_method: z.enum(["replicate", "local"]).optional().describe("Background removal method: 'replicate' for Replicate bria/rmbg-2.0, 'local' for RMBG-2.0 sidecar"),
         })
         .optional()
@@ -1284,9 +1284,26 @@ export namespace Config {
   }
 
   export async function update(config: Info) {
-    const filepath = path.join(Instance.directory, "opencode.json")
-    const existing = await loadFile(filepath)
-    await Bun.write(filepath, JSON.stringify(mergeDeep(existing, config), null, 2))
+    // Prefer opencode.jsonc if it exists in the project directory, otherwise fall back to opencode.json
+    const jsoncPath = path.join(Instance.directory, "opencode.jsonc")
+    const jsonPath = path.join(Instance.directory, "opencode.json")
+    const useJsonc = existsSync(jsoncPath)
+    const filepath = useJsonc ? jsoncPath : jsonPath
+
+    if (useJsonc) {
+      const before = await Bun.file(filepath)
+        .text()
+        .catch((err) => {
+          if (err.code === "ENOENT") return "{}"
+          throw new JsonError({ path: filepath }, { cause: err })
+        })
+      const next = patchJsonc(before, config)
+      parseConfig(next, filepath)
+      await Bun.write(filepath, next)
+    } else {
+      const existing = await loadFile(filepath)
+      await Bun.write(filepath, JSON.stringify(mergeDeep(existing, config), null, 2))
+    }
     await Instance.dispose()
   }
 

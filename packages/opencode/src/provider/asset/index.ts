@@ -69,48 +69,56 @@ export namespace AssetProviderRegistry {
   // ── Initialization from config ───────────────────────────────────────
 
   export async function initFromConfig(): Promise<void> {
-    const config = await Config.get()
-    const assetConfig = (config as any).asset_provider as
-      | Record<string, AssetProvider.ProviderConfig>
-      | undefined
+    // Clear existing providers so re-initialization works after config/auth changes
+    providers.clear()
+    modelCache.clear()
 
-    if (assetConfig) {
-      for (const [providerId, providerConfig] of Object.entries(assetConfig)) {
-        if (providerConfig.enabled === false) {
-          log.info("asset provider disabled", { id: providerId })
-          continue
-        }
+    // Register providers from config (may fail at server startup without Instance context)
+    try {
+      const config = await Config.get()
+      const assetConfig = (config as any).asset_provider as
+        | Record<string, AssetProvider.ProviderConfig>
+        | undefined
 
-        const factory = BUILTIN_FACTORIES[providerId]
-        if (!factory) {
-          log.warn("unknown asset provider", { id: providerId })
-          continue
-        }
-
-        // Resolve API key: config > env var > auth.json
-        let apiKey = providerConfig.api_key
-          ?? (providerConfig.api_key_env ? process.env[providerConfig.api_key_env] : undefined)
-        if (!apiKey) {
-          const authInfo = await Auth.get(providerId)
-          if (authInfo?.type === "api") {
-            apiKey = authInfo.key
+      if (assetConfig) {
+        for (const [providerId, providerConfig] of Object.entries(assetConfig)) {
+          if (providerConfig.enabled === false) {
+            log.info("asset provider disabled", { id: providerId })
+            continue
           }
-        }
-        if (!apiKey) {
-          log.warn("asset provider missing API key", {
-            id: providerId,
-            env: providerConfig.api_key_env ?? "(not configured)",
+
+          const factory = BUILTIN_FACTORIES[providerId]
+          if (!factory) {
+            continue // Skip non-provider keys (e.g. asset type names from old config format)
+          }
+
+          // Resolve API key: config > env var > auth.json
+          let apiKey = providerConfig.api_key
+            ?? (providerConfig.api_key_env ? process.env[providerConfig.api_key_env] : undefined)
+          if (!apiKey) {
+            const authInfo = await Auth.get(providerId)
+            if (authInfo?.type === "api") {
+              apiKey = authInfo.key
+            }
+          }
+          if (!apiKey) {
+            log.warn("asset provider missing API key", {
+              id: providerId,
+              env: providerConfig.api_key_env ?? "(not configured)",
+            })
+            continue
+          }
+
+          const provider = factory({
+            apiKey,
+            apiUrl: providerConfig.api_url,
           })
-          continue
+
+          register(provider)
         }
-
-        const provider = factory({
-          apiKey,
-          apiUrl: providerConfig.api_url,
-        })
-
-        register(provider)
       }
+    } catch (e) {
+      log.warn("config-based asset provider init failed, falling back to auth.json", { error: e })
     }
 
     // Auto-discover: register any provider that has a key in auth.json

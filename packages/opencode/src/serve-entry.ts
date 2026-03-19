@@ -1,12 +1,13 @@
-// Minimal entry point for packaged Makabaka Engine.
+// Minimal entry point for packaged Blured Engine.
 // Bypasses yargs/y18n to avoid Bun single-exe virtual filesystem crash.
 // Usage: opencode-serve.exe [--port PORT] [--hostname HOST]
 
 import { Server } from "./server/server"
+import { DEFAULT_PORT } from "./server/port"
 
 function parseArgs() {
   const args = process.argv.slice(2)
-  let port = 4096
+  let port = DEFAULT_PORT
   let hostname = "127.0.0.1"
 
   for (let i = 0; i < args.length; i++) {

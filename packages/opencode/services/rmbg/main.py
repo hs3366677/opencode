@@ -91,5 +91,5 @@ async def remove_background(request: Request):
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("MAKABAKA_RMBG_PORT", "7860"))
+    port = int(os.environ.get("BLURED_RMBG_PORT", "7860"))
     uvicorn.run(app, host="127.0.0.1", port=port)

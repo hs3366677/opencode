@@ -114,7 +114,9 @@ const targets = singleFlag
     })
   : allTargets
 
-await $`rm -rf dist`
+// Clean dist but preserve node_modules and services in each platform dir
+// (local provider packages installed by the user)
+await $`bash script/clean-dist.sh`
 
 const binaries: Record<string, string> = {}
 if (!skipInstall) {

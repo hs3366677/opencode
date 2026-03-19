@@ -41,9 +41,12 @@ export namespace Shell {
       const git = Bun.which("git")
       if (git) {
         // git.exe is typically at: C:\Program Files\Git\cmd\git.exe
-        // bash.exe is at: C:\Program Files\Git\bin\bash.exe
-        const bash = path.join(git, "..", "..", "bin", "bash.exe")
-        if (Bun.file(bash).size) return bash
+        const gitRoot = path.join(git, "..", "..")
+        // bash.exe can be at bin\bash.exe or usr\bin\bash.exe depending on install
+        for (const rel of ["bin/bash.exe", "usr/bin/bash.exe"]) {
+          const bash = path.join(gitRoot, rel)
+          if (Bun.file(bash).size) return bash
+        }
       }
       return process.env.COMSPEC || "cmd.exe"
     }

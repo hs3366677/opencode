@@ -122,6 +122,38 @@ export const ProviderRoutes = lazy(() =>
         return c.json(await ProviderAuth.methods())
       },
     )
+    .get(
+      "/:providerID/api-key",
+      describeRoute({
+        summary: "Get masked API key",
+        description: "Get the masked API key for a specific provider (if cached).",
+        operationId: "provider.getMaskedApiKey",
+        responses: {
+          200: {
+            description: "Masked API key",
+            content: {
+              "application/json": {
+                schema: resolver(z.object({ masked: z.string() })),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        const providerID = c.req.param("providerID")
+        const allAuth = await Auth.all()
+        const auth = allAuth[providerID]
+        if (!auth || auth.type !== "api" || !auth.key) {
+          return c.json({ masked: "" })
+        }
+        const key = auth.key
+        // Show first 6 and last 4 chars, mask the rest
+        if (key.length <= 12) {
+          return c.json({ masked: key.slice(0, 3) + "***" + key.slice(-2) })
+        }
+        return c.json({ masked: key.slice(0, 6) + "..." + key.slice(-4) })
+      },
+    )
     .post(
       "/:providerID/api-key",
       describeRoute({
@@ -154,7 +186,17 @@ export const ProviderRoutes = lazy(() =>
       ),
       async (c) => {
         const providerID = c.req.valid("param").providerID
-        const { apiKey } = c.req.valid("json")
+        let { apiKey } = c.req.valid("json")
+
+        // "__cached__" sentinel means re-validate the existing cached key
+        if (apiKey === "__cached__") {
+          const allAuth = await Auth.all()
+          const auth = allAuth[providerID]
+          if (!auth || auth.type !== "api" || !auth.key) {
+            return c.json({ error: "No cached key found" }, 400)
+          }
+          apiKey = auth.key
+        }
 
         const cap = PROVIDER_CAPABILITIES[providerID]
         const hasChat = cap?.services.includes("chat")
@@ -162,8 +204,8 @@ export const ProviderRoutes = lazy(() =>
         // Non-chat providers (image gen, 3D, music, etc.) — save key without LLM validation
         if (cap && !hasChat) {
           await ProviderAuth.api({ providerID, key: apiKey })
-          // Also register in asset provider registry so it's available immediately
-          await AssetProviderRegistry.configureProvider(providerID, apiKey).catch(() => {})
+          // Re-initialize all asset providers so the new key is picked up from auth.json
+          await AssetProviderRegistry.initFromConfig().catch(() => {})
           return c.json(true)
         }
 
